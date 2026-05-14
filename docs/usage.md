@@ -1,0 +1,143 @@
+# Usage
+
+`subgrove` is a single shell script driving the lifecycle of feature worktrees in a superproject with submodules. Run it from the main worktree (it refuses inside a linked worktree).
+
+## Setup
+
+1. Place `subgrove` at the superproject root and make it executable. The script expects to live next to the superproject's `.gitmodules`; running it from anywhere else won't find the submodule list.
+
+2. Add `.worktree/` to the superproject's `.gitignore`. `subgrove` refuses to run otherwise.
+
+   ```bash
+   echo '.worktree/' >> .gitignore && git add .gitignore && git commit -m 'chore: ignore worktrees'
+   ```
+
+3. Create `.subgroverc` at the superproject root from [`.subgroverc.example`](../.subgroverc.example). See [Configuration](#configuration) below for the schema. The script runs with all-empty defaults if no config is present — that's enough for a no-build, no-copy workflow.
+
+## Commands
+
+### `subgrove new <name>`
+
+Create `.worktree/<name>/`, branch parent + every submodule onto `<BRANCH_PREFIX><name>`, and run the build chain.
+
+Flags:
+
+- `touch=<csv>` — comma-separated list of submodule paths to branch. Default: all initialized submodules. `touch=none` leaves all submodules in detached HEAD.
+- `build=false` — skip `BUILD_CHAIN`. Useful when you don't need a working build immediately.
+
+Behavior:
+
+- Fetches `origin/main` first to anchor the new worktree on the freshest base. The feature branch is created off `origin/main`, not local `main`.
+- Initializes submodules with `git submodule update --init --reference <main-worktree-sm-gitdir>`, which makes the new worktree share the main worktree's submodule object DB via `objects/info/alternates`. Refs stay isolated per worktree (git's submodule isolation is unavoidable); only objects are shared.
+- Copies items in `COPY_TO_NEW_WORKTREE` from the main worktree into the new worktree. Missing items are silently skipped.
+- Runs `BUILD_CMD` inside each `BUILD_CHAIN` module in order. With `build=false`, prints the commands the user would run.
+- Has an `EXIT`/`INT`/`TERM` rollback trap: if anything fails mid-creation, the half-built worktree and its feature branch are removed so a retry of the same name doesn't trip on residue.
+
+See [docs/design/lifecycle.md](design/lifecycle.md) for the full rationale.
+
+### `subgrove merge <name>`
+
+Fast-forward `<BRANCH_PREFIX><name>` → `main` in every place that has its own view of `main`:
+
+- The main worktree (parent + each touched submodule).
+- Every other linked parent worktree's git dir for each touched submodule (peer propagation).
+
+Flags:
+
+- `push=true` — push merged `main` to origin (parent + each affected submodule). Additionally mirrors the new `origin/main` into peer worktrees' `refs/remotes/origin/main`.
+
+Algorithm: split into validation and mutation phases. Phase 0 discovers touched submodules and filters those that need merging. Phase 1 fetches feat objects into the main worktree and verifies fast-forward feasibility for parent + each submodule — no `main` ref is moved. Phase 2 only runs if Phase 1 passed: moves `main` in main worktree's submodule via `git checkout -B main <feat_sha>`, FF-merges parent's `main`, and propagates to peer worktrees.
+
+Refuses if anything is dirty (parent + every touched submodule, on both sides). The cleanliness gate intentionally has no bypass — see [docs/design/trade-offs.md](design/trade-offs.md) for why `merge -f` is excluded.
+
+See [docs/design/merge.md](design/merge.md) for the full algorithm.
+
+### `subgrove update <name>`
+
+Manual escape hatch: catch a peer worktree's submodule `main` up to `origin/main` without going through `merge`.
+
+From the main worktree: fetches `origin/main` (parent + every submodule), then for each submodule in `<name>` FF-updates its `refs/heads/main` to point at the just-fetched `origin/main`.
+
+Does not touch any working tree, does not auto-rebase, does not push. Prints the rebase command for the user to run themselves.
+
+See [docs/design/update.md](design/update.md) for the sentinel mechanism that makes this possible.
+
+### `subgrove remove <name>`
+
+Remove the worktree at `.worktree/<name>/`. Refuses if dirty (parent or any initialized submodule). Use `-f` (or `--force` / `force=true`) to bypass the dirty check.
+
+Submodule branches `<BRANCH_PREFIX><name>` are retained — they're cheap and removing them across many submodules is its own footgun. Delete manually when confident.
+
+Internal mechanism: `rm -rf` + `git worktree prune` rather than `git worktree remove`. The latter refuses on parent worktrees containing initialized submodules (git ≥ 2.40, no `--force` bypass); the cleanliness gate above is the equivalent safety check.
+
+### `subgrove list`
+
+Wraps `git worktree list`. No subgrove-specific formatting.
+
+### `subgrove help`
+
+Print usage.
+
+## Workflows
+
+### Create a feature
+
+```bash
+./subgrove new my-feature
+cd .worktree/my-feature
+# ... do work, commit ...
+```
+
+### Merge back to main
+
+```bash
+# from main worktree
+./subgrove merge my-feature              # FF main everywhere it needs to land
+./subgrove merge my-feature push=true    # ... and push origin/main
+
+./subgrove remove my-feature             # tear down the worktree (branches retained)
+```
+
+### Catch a peer worktree up
+
+When `my-other-feature` was created (or was sitting idle) before someone else's merge landed:
+
+```bash
+# from main worktree
+./subgrove update my-other-feature
+# then rebase feature branches inside my-other-feature:
+( cd .worktree/my-other-feature && git submodule foreach 'git rebase main' )
+```
+
+The `git submodule foreach 'git rebase main'` line is deliberately written without `|| true` — a real conflict should halt the loop and prompt the user, not look like a no-op pass.
+
+## Configuration
+
+`subgrove` sources `.subgroverc` at the superproject root, if present. Recognized variables:
+
+| Variable | Type | Default | Purpose |
+|---|---|---|---|
+| `BUILD_CHAIN` | bash array | `()` | Ordered submodule paths to init+build during `new`. |
+| `BUILD_CMD` | string | `./init.sh && ./build.sh` | Shell command run inside each `BUILD_CHAIN` module. |
+| `COPY_TO_NEW_WORKTREE` | bash array | `()` | Files/dirs in main worktree to copy into new worktrees. |
+| `BRANCH_PREFIX` | string | `feat/` | Prefix for feature branch names. Include the trailing separator. |
+
+See [`.subgroverc.example`](../.subgroverc.example) for the template.
+
+## Gotchas
+
+- **Cold build cost:** each new worktree pays a full `BUILD_CHAIN` build. Object sharing via alternates makes the *clone* part nearly free; the build chain is the remaining cost.
+- **Alternates are followed, not copied.** New worktrees' submodule git dirs depend on `.git/modules/<sm>/objects` continuing to exist. If you ever want to delete the main worktree's submodule git dir, run `git -C <each-peer-sm> repack -a` first to detach the dependency.
+- **Detached-HEAD commits in submodules:** without `touch=` covering the submodule, commits there land on a detached HEAD and are easily lost. The default branches every submodule for this reason.
+- **Branch name collisions in parent refs (shared):** the parent feature branch is one ref across all worktrees — pick distinct feature names. Submodule refs are isolated, so per-worktree submodule-side collisions are fine, but distinct names are cleanest.
+- **State directories empty by default:** new worktrees start with no app-state populated. Bootstrap via `BUILD_CMD` or whatever per-project setup you have.
+- **Submodule pointer drift in parent:** bumping a submodule SHA on a feat branch makes the parent feat branch record a different submodule SHA than `main`. Normal; merging carries the SHA bump along with the code.
+- **`origin/main` staleness in peers when `push=false`:** without `push=true`, peer worktrees' `refs/remotes/origin/main` is *not* updated. Their `refs/heads/main` *is* (merge step 8). For most workflows this is fine — `refs/heads/main` is what `git rebase main` consults. Run `subgrove update <peer>` if you need the remote-tracking ref current.
+- **Stashing across submodule changes:** if `git status` shows `M <submodule>`, don't `git stash` to clear the dirty-check. The stash captures an old SHA delta that re-applies as a revert after merge advances HEAD past it. Commit or drop those changes instead.
+
+## When to reach for what
+
+- `new` — start a feature.
+- `merge` + `remove` — finish a feature.
+- `update` — peer worktree fell behind because someone else's merge landed; catch up its view of `main` without doing a fresh merge.
+- `list` — sanity-check what's around.

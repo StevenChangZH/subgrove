@@ -1,0 +1,626 @@
+#!/usr/bin/env bash
+#
+# subgrove - parallel feature worktrees for a git superproject with submodules.
+#
+# Each feature lives in its own parent worktree with isolated submodule git
+# dirs; merges propagate across linked worktrees so every worktree's view of
+# `main` stays consistent. Project-specific knobs (BUILD_CHAIN, BRANCH_PREFIX,
+# COPY_TO_NEW_WORKTREE, BUILD_CMD) live in .subgroverc at the superproject
+# root; see .subgroverc.example. Design rationale: docs/design/.
+#
+# Usage:
+#   ./subgrove new <name>                    Create .worktree/<name>/, branch
+#                                            <prefix><name> in parent + every
+#                                            submodule, run BUILD_CHAIN.
+#   ./subgrove new <name> touch=<sm>,<sm>    Branch only the listed submodules.
+#   ./subgrove new <name> touch=none         Parent-only branch; submodules detached.
+#   ./subgrove new <name> build=false        Skip BUILD_CHAIN (run manually later).
+#   ./subgrove merge <name>                  FF-merge <prefix><name> back to main in every
+#                                            touched submodule + parent. Refuses if anything
+#                                            is dirty or non-FF. Worktree is never removed —
+#                                            use `remove` separately when you're done.
+#   ./subgrove merge <name> push=true        Also push merged main branches to origin.
+#   ./subgrove remove <name>                 Remove worktree (refuses if dirty; branches remain).
+#   ./subgrove remove <name> -f              Discard uncommitted work and force-remove (force=true).
+#   ./subgrove update <name>                 Fetch origin in main worktree, then FF each submodule's
+#                                            main in <name>. Manual escape hatch when a peer worktree
+#                                            needs to catch up without going through merge propagation.
+#   ./subgrove list                          Show worktrees and their feature branches.
+#   ./subgrove help                          Show this help.
+
+set -eo pipefail   # no -u: macOS bash 3.2 trips on empty-array expansion
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+WORKTREES_DIR=".worktree"
+
+# Defaults; overridden by .subgroverc next to this script (the superproject
+# root). Each value is documented in .subgroverc.example.
+BUILD_CHAIN=()
+BUILD_CMD="./init.sh && ./build.sh"
+COPY_TO_NEW_WORKTREE=()
+BRANCH_PREFIX="feat/"
+
+if [[ -f "$SCRIPT_DIR/.subgroverc" ]]; then
+    # shellcheck source=/dev/null
+    . "$SCRIPT_DIR/.subgroverc"
+fi
+
+err() { echo "Error: $*" >&2; exit 1; }
+info() { echo ">>> $*"; }
+
+# Rollback support for cmd_new — wired via trap once a worktree dir has been
+# materialised. Globals (not locals) so the EXIT-trap handler sees them no
+# matter where in the call stack the failure originated.
+ROLLBACK_WT=""
+ROLLBACK_BR=""
+_rollback_new() {
+    local rc=$?
+    if [[ -n "$ROLLBACK_WT" ]]; then
+        echo ">>> rolling back partial worktree at $ROLLBACK_WT" >&2
+        rm -rf "$ROLLBACK_WT"
+        git -C "$SCRIPT_DIR" worktree prune 2>/dev/null || true
+        [[ -n "$ROLLBACK_BR" ]] && git -C "$SCRIPT_DIR" branch -D "$ROLLBACK_BR" 2>/dev/null
+    fi
+    exit "$rc"
+}
+
+usage() {
+    cat <<'EOF'
+subgrove - parallel feature worktrees for a git superproject with submodules
+
+  ./subgrove new <name>                    Create .worktree/<name>/, branch
+                                           <prefix><name> in parent + every
+                                           submodule, run BUILD_CHAIN.
+  ./subgrove new <name> touch=<sm>,<sm>    Branch only the listed submodules.
+  ./subgrove new <name> touch=none         Parent-only branch; submodules detached.
+  ./subgrove new <name> build=false        Skip BUILD_CHAIN (run manually later).
+  ./subgrove merge <name>                  FF-merge <prefix><name> back to main in every
+                                           touched submodule + parent. Refuses if anything
+                                           is dirty or non-FF. Worktree is never removed —
+                                           use `remove` separately when you're done.
+  ./subgrove merge <name> push=true        Also push merged main branches to origin.
+  ./subgrove remove <name>                 Remove worktree (refuses if dirty; branches remain).
+  ./subgrove remove <name> -f              Discard uncommitted work and force-remove (force=true).
+  ./subgrove update <name>                 Fetch origin in main worktree, then FF each submodule's
+                                           main in <name>. Manual escape hatch when a peer worktree
+                                           needs to catch up without going through merge propagation.
+  ./subgrove list                          Show worktrees and their feature branches.
+  ./subgrove help                          Show this help.
+
+See docs/design/ for design rationale, docs/usage.md for the long-form reference.
+EOF
+}
+
+# ---- Validation ---------------------------------------------------------
+
+validate_name() {
+    local name="${1:-}"
+    [[ -z "$name" ]] && err "feature name required"
+    [[ "$name" =~ ^[a-zA-Z0-9._-]+$ ]] || err "name must match [a-zA-Z0-9._-]+, got '$name'"
+    [[ "$name" =~ ^[.-] ]] && err "name must not start with '.' or '-'"
+    return 0
+}
+
+assert_main_worktree() {
+    local git_dir git_common
+    git_dir="$(git rev-parse --git-dir 2>/dev/null)" || err "not in a git repo"
+    git_common="$(git rev-parse --git-common-dir 2>/dev/null)"
+    git_dir="$(cd "$git_dir" && pwd)"
+    git_common="$(cd "$git_common" && pwd)"
+    [[ "$git_dir" == "$git_common" ]] || err "run from the main worktree (currently in a linked worktree)"
+}
+
+assert_worktrees_ignored() {
+    git check-ignore -q "$WORKTREES_DIR" 2>/dev/null || err "$WORKTREES_DIR/ is not gitignored.
+    Add it first:
+        echo '$WORKTREES_DIR/' >> .gitignore && git add .gitignore && git commit -m 'chore: ignore worktrees'"
+}
+
+# is_clean DIR  -> 0 if working tree + index are clean, 1 otherwise (untracked allowed)
+is_clean() {
+    git -C "$1" diff --quiet 2>/dev/null && git -C "$1" diff --cached --quiet 2>/dev/null
+}
+
+require_clean() {
+    local label="$1" dir="$2"
+    is_clean "$dir" || err "$label has uncommitted changes — clear it and re-run.
+        cd $dir
+        git status            # see what's changed
+        # Avoid 'git stash' when a 'M <submodule>' line is present — the stash
+        # captures an old SHA delta that becomes a revert after merge advances
+        # HEAD past it."
+}
+
+# ---- Argument parsing ---------------------------------------------------
+
+# parse_kv KEY DEFAULT ARGS...  -> echoes value found in ARGS, else DEFAULT
+parse_kv() {
+    local key="$1" default="$2"; shift 2
+    local arg
+    for arg in "$@"; do
+        if [[ "$arg" == "$key="* ]]; then
+            echo "${arg#*=}"
+            return 0
+        fi
+    done
+    echo "$default"
+}
+
+# ---- Submodule helpers --------------------------------------------------
+
+list_all_submodules() {
+    git config --file "$SCRIPT_DIR/.gitmodules" --get-regexp 'submodule\..*\.path' | awk '{print $2}'
+}
+
+# resolve_touch_list VALUE  -> prints submodule paths, one per line
+resolve_touch_list() {
+    local value="$1"
+    case "$value" in
+        all)  list_all_submodules ;;
+        none) ;;
+        *)    tr ',' '\n' <<< "$value" | sed '/^$/d' ;;
+    esac
+}
+
+# ---- Subcommands --------------------------------------------------------
+
+cmd_new() {
+    local name="${1:-}"
+    validate_name "$name"
+    shift || true
+
+    local touch_arg build_arg
+    touch_arg="$(parse_kv touch all "$@")"
+    build_arg="$(parse_kv build true "$@")"
+
+    local branch="${BRANCH_PREFIX}$name"
+    local wt_path="$SCRIPT_DIR/$WORKTREES_DIR/$name"
+    local base="main"
+    local item sm sm_path module
+    local touch_list=()
+
+    cd "$SCRIPT_DIR"
+    assert_main_worktree
+    assert_worktrees_ignored
+
+    [[ -e "$wt_path" ]] && err "$wt_path already exists"
+    if git rev-parse --verify --quiet "refs/heads/$branch" >/dev/null; then
+        err "branch '$branch' already exists in parent repo"
+    fi
+
+    # Pick the freshest available base. Without this, a worktree silently
+    # branches off whatever local refs happened to be when the user last
+    # pulled — exactly the staleness mode we just fixed in cmd_merge.
+    info "Fetching origin/main"
+    git fetch --quiet origin main || echo "    warn: parent fetch failed; continuing with local refs"
+    if git rev-parse --verify --quiet refs/remotes/origin/main >/dev/null; then
+        base="origin/main"
+    fi
+
+    info "Creating worktree at $wt_path on branch $branch (base: $base)"
+    git worktree add "$wt_path" -b "$branch" "$base"
+
+    # Arm rollback: from here onwards, any non-zero exit (including err / set -e
+    # / Ctrl-C) tears down the half-built worktree so a retry of the same name
+    # doesn't trip on residue. Disarmed at end of cmd_new on success.
+    ROLLBACK_WT="$wt_path"
+    ROLLBACK_BR="$branch"
+    trap _rollback_new EXIT INT TERM
+
+    for item in "${COPY_TO_NEW_WORKTREE[@]}"; do
+        if [[ -e "$SCRIPT_DIR/$item" ]]; then
+            info "Copying $item (untracked)"
+            cp -a "$SCRIPT_DIR/$item" "$wt_path/"
+        fi
+    done
+
+    # Submodule git dirs are isolated per parent worktree, but we can avoid
+    # re-cloning every submodule by passing --reference to the underlying
+    # clone. This sets objects/info/alternates in the new submodule git dir
+    # to borrow from main worktree's, saving bandwidth + disk.
+    info "Initialising submodules (sharing objects with main worktree where possible)"
+    while IFS= read -r sm; do
+        if [[ -d "$SCRIPT_DIR/.git/modules/$sm" ]]; then
+            ( cd "$wt_path" && git submodule update --init --reference "$SCRIPT_DIR/.git/modules/$sm" -- "$sm" ) \
+                || err "submodule init failed for $sm"
+        else
+            ( cd "$wt_path" && git submodule update --init -- "$sm" ) \
+                || err "submodule init failed for $sm"
+        fi
+    done < <(list_all_submodules)
+
+    while IFS= read -r sm; do
+        [[ -n "$sm" ]] && touch_list+=("$sm")
+    done < <(resolve_touch_list "$touch_arg")
+
+    if [[ ${#touch_list[@]} -gt 0 ]]; then
+        info "Branching ${#touch_list[@]} submodule(s) to $branch"
+        for sm in "${touch_list[@]}"; do
+            sm_path="$wt_path/$sm"
+            [[ -d "$sm_path" ]] || err "$sm: no such submodule path under $wt_path"
+            # Submodule git dirs are freshly created by `git submodule update --init`
+            # under .git/worktrees/<name>/modules/<sm>/, so refs are empty and a
+            # collision here is a genuine error rather than a recoverable skip.
+            ( cd "$sm_path" && git checkout -b "$branch" ) \
+                || err "$sm: failed to create branch '$branch'"
+        done
+    else
+        info "Submodule branching skipped (touch=none)"
+    fi
+
+    if [[ ${#BUILD_CHAIN[@]} -eq 0 ]]; then
+        info "No BUILD_CHAIN configured — skipping auto-build"
+    elif [[ "$build_arg" == "true" ]]; then
+        info "Running build chain (cold builds are slow)"
+        for module in "${BUILD_CHAIN[@]}"; do
+            info "  build: $module"
+            ( cd "$wt_path/$module" && eval "$BUILD_CMD" )
+        done
+    else
+        info "Build chain skipped (build=false). Run manually:"
+        for module in "${BUILD_CHAIN[@]}"; do
+            echo "    ( cd $wt_path/$module && $BUILD_CMD )"
+        done
+    fi
+
+    # Disarm rollback — cmd_new completed successfully.
+    ROLLBACK_WT=""
+    ROLLBACK_BR=""
+    trap - EXIT INT TERM
+
+    cat <<EOF
+
+Worktree ready: $wt_path
+Branch:         $branch
+EOF
+}
+
+cmd_remove() {
+    local name="${1:-}"
+    validate_name "$name"
+    shift || true
+
+    # Allow -f / --force as shorthand for force=true.
+    local args=() arg
+    for arg in "$@"; do
+        case "$arg" in
+            -f|--force) args+=("force=true") ;;
+            *)          args+=("$arg") ;;
+        esac
+    done
+    set -- "${args[@]}"
+
+    local force_arg
+    force_arg="$(parse_kv force false "$@")"
+
+    local wt_path="$SCRIPT_DIR/$WORKTREES_DIR/$name"
+
+    cd "$SCRIPT_DIR"
+    assert_main_worktree
+    [[ -d "$wt_path" ]] || err "$wt_path does not exist (or is not a directory)"
+
+    if [[ "$force_arg" != "true" ]]; then
+        info "Checking for uncommitted changes (force=true to bypass)"
+        require_clean "feature worktree (parent)" "$wt_path"
+        # Check every initialised submodule, not just ones with the feature
+        # branch — un-branched but edited submodules would otherwise be wiped
+        # by the rm -rf below without warning.
+        local sm
+        while IFS= read -r sm; do
+            [[ -e "$wt_path/$sm/.git" ]] || continue
+            require_clean "submodule '$sm' in feature worktree" "$wt_path/$sm"
+        done < <(list_all_submodules)
+    fi
+
+    # `git worktree remove` refuses on worktrees containing submodules (git 2.40+;
+    # --force does not bypass it). The cleanliness gate above is our equivalent
+    # safety check; the actual removal is a direct rm + prune.
+    # `git worktree prune` recursively cleans .git/worktrees/<name>/ including
+    # the submodule git dirs nested under it (modules/<sm>/), so no additional
+    # per-submodule cleanup is needed for this layout.
+    info "Removing worktree at $wt_path (branches retained)"
+    rm -rf "$wt_path"
+    git worktree prune
+}
+
+cmd_merge() {
+    local name="${1:-}"
+    validate_name "$name"
+    shift || true
+
+    local push_arg
+    push_arg="$(parse_kv push false "$@")"
+
+    local branch="${BRANCH_PREFIX}$name"
+    local wt_path="$SCRIPT_DIR/$WORKTREES_DIR/$name"
+
+    cd "$SCRIPT_DIR"
+    assert_main_worktree
+    [[ -d "$wt_path" ]] || err "$wt_path does not exist"
+    git rev-parse --verify --quiet "refs/heads/$branch" >/dev/null \
+        || err "parent branch '$branch' not found"
+
+    # Discover touched submodules: those with a local feature branch.
+    info "Discovering touched submodules"
+    local touched=() sm sm_path
+    while IFS= read -r sm; do
+        sm_path="$wt_path/$sm"
+        [[ -e "$sm_path/.git" ]] || continue
+        if git -C "$sm_path" rev-parse --verify --quiet "refs/heads/$branch" >/dev/null; then
+            touched+=("$sm")
+        fi
+    done < <(list_all_submodules)
+    if [[ ${#touched[@]} -gt 0 ]]; then
+        echo "    touched: ${touched[*]}"
+    else
+        echo "    touched: (none)"
+    fi
+
+    # --- Validation: no uncommitted changes in source (feature) or dst (main) ---
+    # Done broadly across every touched submodule, even ones with no commits —
+    # uncommitted work in a "no-op" submodule is still work the user could lose.
+    info "Checking for uncommitted changes (source + dst)"
+    require_clean "main worktree (parent, dst)"    "$SCRIPT_DIR"
+    require_clean "feature worktree (parent, src)" "$wt_path"
+    for sm in "${touched[@]}"; do
+        require_clean "main submodule '$sm' (dst)"    "$SCRIPT_DIR/$sm"
+        require_clean "feature submodule '$sm' (src)" "$wt_path/$sm"
+    done
+
+    # --- Filter: feat tip vs MAIN-WORKTREE's main (each parent worktree has
+    # an independent submodule git dir; the "destination" main lives in main
+    # worktree's submodule, not the linked one).
+    info "Filtering to modules with new commits"
+    local needs_merge=() skipped=()
+    local feat_sha main_sha linked_sm_path main_sm_path
+    for sm in "${touched[@]}"; do
+        linked_sm_path="$wt_path/$sm"
+        main_sm_path="$SCRIPT_DIR/$sm"
+        feat_sha="$(git -C "$linked_sm_path" rev-parse "refs/heads/$branch")"
+        main_sha=""
+        if git -C "$main_sm_path" rev-parse --verify --quiet refs/heads/main >/dev/null 2>&1; then
+            main_sha="$(git -C "$main_sm_path" rev-parse refs/heads/main)"
+        fi
+        if [[ "$feat_sha" == "$main_sha" ]]; then
+            skipped+=("$sm")
+        else
+            needs_merge+=("$sm")
+        fi
+    done
+    local parent_needs_merge=true
+    if [[ "$(git rev-parse refs/heads/main)" == "$(git rev-parse "refs/heads/$branch")" ]]; then
+        parent_needs_merge=false
+    fi
+    [[ ${#skipped[@]} -gt 0 ]] && echo "    skip (no commits): ${skipped[*]}"
+    if [[ ${#needs_merge[@]} -eq 0 ]] && [[ "$parent_needs_merge" == "false" ]]; then
+        info "Nothing to merge (everything already at feat tip)"
+    else
+        echo "    will merge submodules: ${needs_merge[*]:-(none)}"
+        echo "    will merge parent:     $parent_needs_merge"
+    fi
+
+    # --- Phase 1: validation pass — fetch feat objects and run all FF checks
+    # before any main is moved. Without this split, a non-FF on submodule N+1
+    # would leave the first N submodules already moved (half-state).
+    if [[ ${#needs_merge[@]} -gt 0 ]]; then
+        info "Validating fast-forward feasibility"
+        for sm in "${needs_merge[@]}"; do
+            linked_sm_path="$wt_path/$sm"
+            main_sm_path="$SCRIPT_DIR/$sm"
+            [[ -e "$main_sm_path/.git" ]] \
+                || err "submodule '$sm' is not initialized in main worktree at $main_sm_path"
+
+            # Submodule git dirs are isolated per parent worktree — ship the
+            # feat-branch objects + ref into main worktree's submodule git
+            # dir. Creates refs/heads/<branch> there but does NOT move main.
+            # --quiet hides "From <path>" progress noise; real errors still
+            # reach stderr so the err line below is accompanied by git's own
+            # reason rather than appearing as a bare wrapper message.
+            git -C "$main_sm_path" fetch --quiet "$linked_sm_path" \
+                "+refs/heads/$branch:refs/heads/$branch" \
+                || err "$sm: failed to fetch $branch from $linked_sm_path"
+
+            if git -C "$main_sm_path" rev-parse --verify --quiet refs/heads/main >/dev/null 2>&1; then
+                git -C "$main_sm_path" merge-base --is-ancestor refs/heads/main "refs/heads/$branch" 2>/dev/null \
+                    || err "submodule '$sm' main (main worktree) is not ancestor of $branch (non-FF).
+        Rebase the feature branch first:
+            ( cd $linked_sm_path && git fetch $main_sm_path main && git rebase FETCH_HEAD )"
+            fi
+        done
+    fi
+    if [[ "$parent_needs_merge" == "true" ]]; then
+        git merge-base --is-ancestor refs/heads/main "refs/heads/$branch" 2>/dev/null \
+            || err "parent main is not ancestor of $branch (non-FF).
+        Rebase first:  git rebase main $branch"
+    fi
+
+    # --- Phase 2: mutation pass — all checks passed, now move refs.
+    if [[ ${#needs_merge[@]} -gt 0 ]]; then
+        info "Moving main forward in main worktree's submodules"
+        for sm in "${needs_merge[@]}"; do
+            linked_sm_path="$wt_path/$sm"
+            main_sm_path="$SCRIPT_DIR/$sm"
+            feat_sha="$(git -C "$linked_sm_path" rev-parse "refs/heads/$branch")"
+            echo "    $sm: main → ${feat_sha:0:12}"
+            # checkout -B reattaches HEAD → refs/heads/main, force-moves it to
+            # feat_sha, and updates the working tree atomically. Cleanliness
+            # was already gated by require_clean above.
+            git -C "$main_sm_path" checkout -B main "$feat_sha" --quiet \
+                || err "$sm: failed to FF main worktree's submodule to ${feat_sha:0:12}"
+        done
+    fi
+
+    if [[ "$parent_needs_merge" == "true" ]]; then
+        info "Fast-forwarding parent main"
+        git merge --ff-only "$branch"
+    fi
+
+    # --- Propagate new submodule main to peer worktrees ---
+    # Submodule git dirs are isolated per parent worktree, so peer worktrees
+    # have their own refs/heads/main that would otherwise lag forever. Parent
+    # refs are shared, so no parent-side propagation is needed.
+    if [[ ${#needs_merge[@]} -gt 0 ]] && [[ -d "$SCRIPT_DIR/$WORKTREES_DIR" ]]; then
+        local peer_wt peer_name peer_sm peer_count=0 peer_skipped=0
+        local propagated=false
+        for peer_wt in "$SCRIPT_DIR/$WORKTREES_DIR"/*; do
+            [[ -d "$peer_wt" ]] || continue
+            [[ "$peer_wt" == "$wt_path" ]] && continue
+            peer_name="$(basename "$peer_wt")"
+            for sm in "${needs_merge[@]}"; do
+                peer_sm="$peer_wt/$sm"
+                [[ -e "$peer_sm/.git" ]] || continue
+                if [[ "$propagated" == "false" ]]; then
+                    info "Propagating new main to peer worktrees"
+                    propagated=true
+                fi
+                # No `+`: refuse non-FF rather than clobber a peer's diverged main.
+                # Two distinct failure modes — distinguish via HEAD inspection
+                # so the warning points at the actual cause.
+                if git -C "$peer_sm" fetch "$SCRIPT_DIR/$sm" \
+                       refs/heads/main:refs/heads/main 2>/dev/null; then
+                    peer_count=$((peer_count + 1))
+                else
+                    local peer_head
+                    peer_head="$(git -C "$peer_sm" symbolic-ref --quiet HEAD 2>/dev/null || true)"
+                    if [[ "$peer_head" == "refs/heads/main" ]]; then
+                        echo "    warn: $peer_name/$sm has main checked out — propagation refused (run 'git checkout <feat>' there, then re-merge)"
+                    else
+                        echo "    warn: $peer_name/$sm main has diverged from main worktree's main — left as-is"
+                    fi
+                    peer_skipped=$((peer_skipped + 1))
+                    continue
+                fi
+                # If we're about to push, mirror peer's origin/main too so the
+                # peer's remote-tracking ref doesn't lag the actual origin.
+                if [[ "$push_arg" == "true" ]]; then
+                    git -C "$peer_sm" fetch "$SCRIPT_DIR/$sm" \
+                        "+refs/heads/main:refs/remotes/origin/main" 2>/dev/null || true
+                fi
+            done
+        done
+        if [[ "$propagated" == "true" ]]; then
+            echo "    propagated to $peer_count peer module(s); $peer_skipped skipped"
+        fi
+    fi
+
+    if [[ "$push_arg" == "true" ]]; then
+        if [[ ${#needs_merge[@]} -eq 0 ]] && [[ "$parent_needs_merge" == "false" ]]; then
+            info "Push skipped (nothing was merged)"
+        else
+            info "Pushing updated main branches to origin"
+            for sm in "${needs_merge[@]}"; do
+                echo "    pushing $sm main"
+                git -C "$SCRIPT_DIR/$sm" push origin main
+            done
+            if [[ "$parent_needs_merge" == "true" ]]; then
+                echo "    pushing parent main"
+                git push origin main
+            fi
+        fi
+    else
+        info "Push skipped (push=true to enable)"
+    fi
+
+    info "Worktree retained at $wt_path (use 'remove' separately when ready)"
+
+    cat <<EOF
+
+Merge complete.
+  Branch:             $branch
+  Submodules merged:  ${needs_merge[*]:-(none)}
+  Submodules skipped: ${skipped[*]:-(none)}
+  Parent merged:      $parent_needs_merge
+  Pushed:             $push_arg
+EOF
+}
+
+cmd_update() {
+    local name="${1:-}"
+    validate_name "$name"
+
+    local wt_path="$SCRIPT_DIR/$WORKTREES_DIR/$name"
+    cd "$SCRIPT_DIR"
+    assert_main_worktree
+    [[ -d "$wt_path" ]] || err "$wt_path does not exist"
+
+    info "Fetching origin/main in main worktree (parent + submodules)"
+    git fetch --quiet origin main \
+        || echo "    warn: parent fetch failed; continuing with local refs"
+    local sm
+    while IFS= read -r sm; do
+        [[ -e "$SCRIPT_DIR/$sm/.git" ]] || continue
+        git -C "$SCRIPT_DIR/$sm" fetch --quiet origin main \
+            || echo "    warn: $sm fetch failed; continuing with local refs"
+    done < <(list_all_submodules)
+
+    info "FF-updating peer worktree '$name' submodule mains from origin/main"
+    local peer_sm peer_head updated=0 skipped=0 main_sm_path
+    local sync_ref="refs/heads/_update_sync"
+    while IFS= read -r sm; do
+        peer_sm="$wt_path/$sm"
+        [[ -e "$peer_sm/.git" ]] || continue
+        main_sm_path="$SCRIPT_DIR/$sm"
+        [[ -d "$SCRIPT_DIR/.git/modules/$sm" ]] || continue
+
+        # Source of truth is refs/remotes/origin/main (what we just fetched),
+        # NOT refs/heads/main (which the origin fetch never advanced). Local-
+        # path `git fetch` uses upload-pack and upload-pack only advertises
+        # refs/heads/* and refs/tags/*, so we stage origin/main under a
+        # transient head ref for the duration of the fetch.
+        if ! git -C "$main_sm_path" rev-parse --verify --quiet refs/remotes/origin/main >/dev/null; then
+            echo "    warn: $sm — no refs/remotes/origin/main in main worktree; skipped"
+            skipped=$((skipped + 1))
+            continue
+        fi
+        # Pre-clean defensively in case a prior interrupted run left it.
+        git -C "$main_sm_path" update-ref -d "$sync_ref" 2>/dev/null || true
+        git -C "$main_sm_path" update-ref "$sync_ref" refs/remotes/origin/main
+
+        if git -C "$peer_sm" fetch --quiet "$main_sm_path" \
+               "$sync_ref:refs/heads/main" 2>/dev/null; then
+            updated=$((updated + 1))
+        else
+            peer_head="$(git -C "$peer_sm" symbolic-ref --quiet HEAD 2>/dev/null || true)"
+            if [[ "$peer_head" == "refs/heads/main" ]]; then
+                echo "    warn: $sm has main checked out in $name — skipped"
+            else
+                echo "    warn: $sm main in $name has diverged from origin/main — skipped"
+            fi
+            skipped=$((skipped + 1))
+        fi
+
+        git -C "$main_sm_path" update-ref -d "$sync_ref" 2>/dev/null || true
+    done < <(list_all_submodules)
+
+    info "Updated $updated submodule main(s); $skipped skipped"
+    cat <<EOF
+
+Next: rebase the feature branches in $name onto the new main where needed.
+  cd $wt_path
+  git submodule foreach 'git rebase main'      # let conflicts halt the loop
+EOF
+}
+
+cmd_list() {
+    cd "$SCRIPT_DIR"
+    assert_main_worktree
+    git worktree list
+}
+
+# ---- Dispatch -----------------------------------------------------------
+
+main() {
+    local subcmd="${1:-help}"
+    shift 2>/dev/null || true
+    case "$subcmd" in
+        new)             cmd_new "$@" ;;
+        merge)           cmd_merge "$@" ;;
+        remove|rm)       cmd_remove "$@" ;;
+        update)          cmd_update "$@" ;;
+        list|ls)         cmd_list ;;
+        help|-h|--help)  usage ;;
+        *)               usage; exit 1 ;;
+    esac
+}
+
+main "$@"

@@ -1,0 +1,20 @@
+# subgrove configuration.
+# Place this file at the superproject root as `.subgroverc` (no .example suffix).
+# Sourced by `subgrove` at startup.
+
+# BUILD_CHAIN: ordered submodule paths to build during `new`. Each module is
+# built by running BUILD_CMD inside its directory. Empty = no auto-build.
+BUILD_CHAIN=()
+
+# BUILD_CMD: shell command run inside each BUILD_CHAIN module. Used only when
+# BUILD_CHAIN is non-empty and `new` is invoked without `build=false`.
+BUILD_CMD="./init.sh && ./build.sh"
+
+# COPY_TO_NEW_WORKTREE: files or directories under the main worktree to copy
+# into each new worktree (e.g. local-only editor settings, generated TLS
+# certs). Items missing in the main worktree are silently skipped.
+COPY_TO_NEW_WORKTREE=()
+
+# BRANCH_PREFIX: feature branch prefix. e.g. "feat/" + name "foo" → "feat/foo".
+# Include the trailing separator if you want one (typically "/").
+BRANCH_PREFIX="feat/"
