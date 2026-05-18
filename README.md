@@ -89,6 +89,20 @@ The script's complexity is a direct consequence of holding three properties simu
 - [trade-offs.md](docs/design/trade-offs.md) — alternatives considered & rejected
 - [implementation-notes.md](docs/design/implementation-notes.md) — cross-cutting invariants
 - [prior-art.md](docs/design/prior-art.md) — survey of related tools and the gap subgrove fills
+- [testing.md](docs/design/testing.md) — how the test suite is structured (+ [testing-local.md](docs/design/testing-local.md) listing every local test case)
+
+## Testing
+
+A real-git test suite lives under `tests/`. No mocks — each scenario builds a fresh superproject + two submodules from scratch via `git init`, runs subgrove against the fixture, and asserts both the command output and the resulting repository state.
+
+```bash
+./tests/run.sh --local-only       # local tests only (no GitHub needed)
+./tests/run.sh                    # local + remote (requires tests/config.sh)
+./tests/run.sh -v test_merge      # verbose, filtered to one test
+./tests/run.sh --clean            # wipe tests/run/ (kept fixtures from failed scenarios)
+```
+
+Remote tests push to three GitHub repos configured in [`tests/config.sh`](tests/config.sh) — fill those URLs in before enabling. Fixtures land under `tests/run/` (gitignored). See [docs/design/testing.md](docs/design/testing.md) for the design.
 
 ## License
 
