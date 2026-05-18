@@ -103,3 +103,116 @@ assert_file_absent() {
     local path="$1"
     [[ ! -e "$path" ]] || fail "expected to NOT exist: $path"
 }
+
+# snapshot_state DIR
+# Captures DIR's repo state as a printable blob: HEAD ref + SHA, working
+# tree status (`git status --porcelain`), unstaged diff, staged diff.
+#
+# Intentionally excludes `git show-ref`: linked worktrees share parent-repo
+# refs with the main worktree, so `refs/heads/main` legitimately changes
+# under a worktree's feet when main super advances during merge. The fields
+# captured here track what's local to the working dir + HEAD + index, which
+# is what "this dir wasn't touched" really means in practice.
+#
+# Use with assert_state_eq across an operation to verify it didn't touch
+# the repo. Particularly useful on dirty-refuse paths: the pending edits
+# (staged or unstaged) must still be present and unchanged afterward.
+snapshot_state() {
+    local dir="$1"
+    {
+        echo "HEAD-ref: $(git -C "$dir" symbolic-ref HEAD 2>/dev/null || echo detached)"
+        echo "HEAD-sha: $(git -C "$dir" rev-parse HEAD 2>/dev/null || echo none)"
+        echo "--- status ---"
+        # -uno: exclude untracked files. Tests redirect subgrove's output
+        # to an `out` file inside the working dir; that's a test artifact,
+        # not state subgrove touched. Modifications and staged changes are
+        # still reported as expected.
+        git -C "$dir" status --porcelain=v1 -uno 2>/dev/null || true
+        echo "--- unstaged ---"
+        git -C "$dir" diff 2>/dev/null || true
+        echo "--- staged ---"
+        git -C "$dir" diff --cached 2>/dev/null || true
+    }
+}
+
+# assert_state_eq DIR EXPECTED_SNAPSHOT [MSG]
+# Verifies DIR's current snapshot matches a previously-captured one.
+assert_state_eq() {
+    local dir="$1" expected="$2" msg="${3:-}"
+    local actual
+    actual="$(snapshot_state "$dir")"
+    if [[ "$expected" != "$actual" ]]; then
+        echo "--- snapshot mismatch in $dir ---" >&2
+        diff <(echo "$expected") <(echo "$actual") >&2 || true
+        fail "${msg:+$msg: }state in $dir changed unexpectedly"
+    fi
+}
+
+# assert_ancestor GIT_DIR ANCESTOR DESCENDANT [MSG]
+# Verifies ANCESTOR is reachable from DESCENDANT (i.e. ANCESTOR is in
+# DESCENDANT's commit history).
+assert_ancestor() {
+    local dir="$1" ancestor="$2" descendant="$3" msg="${4:-}"
+    git -C "$dir" merge-base --is-ancestor "$ancestor" "$descendant" 2>/dev/null \
+        || fail "${msg:+$msg: }$ancestor is not an ancestor of $descendant in $dir"
+}
+
+# assert_commits_ahead DIR FROM TO EXPECTED [MSG]
+# Verifies there are exactly EXPECTED commits between FROM..TO in DIR.
+# Use to pin the commit-state of a repo: e.g.
+#   assert_commits_ahead .worktree/feat-x main feat/feat-x 1
+# verifies feat/feat-x is exactly one commit ahead of main.
+assert_commits_ahead() {
+    local dir="$1" from="$2" to="$3" expected="$4" msg="${5:-}"
+    local actual
+    actual="$(git -C "$dir" rev-list --count "${from}..${to}" 2>/dev/null)" || actual="?"
+    [[ "$actual" == "$expected" ]] \
+        || fail "${msg:+$msg: }$dir: expected $expected commits between $from..$to, got $actual"
+}
+
+# assert_pending_file DIR FILE MODE [MSG]
+# Verifies FILE has a specific kind of pending change in DIR.
+# MODE: "unstaged" | "staged" | "both" | "none"
+# Uses `git status --porcelain` short-format codes:
+#   " M" = unstaged modification
+#   "M " = staged modification (index)
+#   "MM" = both staged and unstaged
+#   ""   = clean
+assert_pending_file() {
+    local dir="$1" file="$2" mode="$3" msg="${4:-}"
+    local actual
+    actual="$(git -C "$dir" status --porcelain -- "$file" 2>/dev/null)"
+    case "$mode" in
+        none)
+            [[ -z "$actual" ]] \
+                || fail "${msg:+$msg: }$dir: expected $file clean, got: '$actual'"
+            ;;
+        unstaged)
+            [[ "$actual" == " M $file" ]] \
+                || fail "${msg:+$msg: }$dir: expected '$file' unstaged-modified, got: '$actual'"
+            ;;
+        staged)
+            [[ "$actual" == "M  $file" ]] \
+                || fail "${msg:+$msg: }$dir: expected '$file' staged-modified, got: '$actual'"
+            ;;
+        both)
+            [[ "$actual" == "MM $file" ]] \
+                || fail "${msg:+$msg: }$dir: expected '$file' both staged+unstaged, got: '$actual'"
+            ;;
+        *)
+            fail "assert_pending_file: unknown mode '$mode' (use none|unstaged|staged|both)"
+            ;;
+    esac
+}
+
+# assert_pending_submodule DIR SM_PATH [MSG]
+# Verifies the parent at DIR shows SM_PATH as having a submodule SHA delta
+# (the "M <submodule>" state that fires when a submodule's HEAD moved
+# without the parent recording a bump).
+assert_pending_submodule() {
+    local dir="$1" sm="$2" msg="${3:-}"
+    local actual
+    actual="$(git -C "$dir" status --porcelain -- "$sm" 2>/dev/null)"
+    [[ "$actual" == " M $sm" ]] \
+        || fail "${msg:+$msg: }$dir: expected '$sm' as M (submodule SHA delta), got: '$actual'"
+}

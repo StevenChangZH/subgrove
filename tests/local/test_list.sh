@@ -11,8 +11,10 @@ cd "$FIXTURE_SUPER"
 ./subgrove new feat-a >out 2>&1
 ./subgrove new feat-b >out 2>&1
 ./subgrove list > out 2>&1
-assert_grep out "feat-a"
-assert_grep out "feat-b"
+# Pin the branch annotation `git worktree list` emits — confirms both
+# feat branches are listed (not just that the names appear somewhere).
+assert_grep out "\[feat/feat-a\]"
+assert_grep out "\[feat/feat-b\]"
 cleanup_fixture
 
 # --- case: ls alias ---
@@ -38,12 +40,14 @@ cd "$FIXTURE_SUPER"
 assert_grep out "subgrove new"
 cleanup_fixture
 
-# --- case: bogus subcommand → exit non-zero ---
+# --- case: bogus subcommand → exit non-zero AND prints usage ---
 mkfixture_local list_bogus
 cd "$FIXTURE_SUPER"
 if ./subgrove bogus-cmd-xyz >out 2>&1; then
     fail "expected bogus subcommand to exit non-zero"
 fi
+# Per the dispatcher's `*) usage; exit 1`, the usage text is printed.
+assert_grep out "subgrove new"
 cleanup_fixture
 
 # --- case: rm alias ---

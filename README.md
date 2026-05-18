@@ -102,7 +102,9 @@ A real-git test suite lives under `tests/`. No mocks — each scenario builds a 
 ./tests/run.sh --clean            # wipe tests/run/ (kept fixtures from failed scenarios)
 ```
 
-Remote tests push to three GitHub repos configured in [`tests/config.sh`](tests/config.sh) — fill those URLs in before enabling. Fixtures land under `tests/run/` (gitignored). See [docs/design/testing.md](docs/design/testing.md) for the design.
+Remote tests push to three GitHub repos configured in [`tests/config.sh`](tests/config.sh) — fill those URLs in before enabling. Fixtures land under `tests/run/` (gitignored).
+
+The patterns the suite uses (pre/post state verification, snapshot equality on refuse, history-ancestor on success, specific err-text and info-line greps, matrix coverage for state-sensitive commands) are documented in [docs/design/testing.md § Test design principles](docs/design/testing.md#test-design-principles). Adding new tests should follow those.
 
 ## License
 

@@ -20,3 +20,5 @@ If anything during `new` fails after the worktree directory has been created (su
 The cleanliness gate covers **every initialised submodule** in the worktree, not just those with a `<prefix><name>` branch — un-branched-but-edited submodules would otherwise be silently destroyed by the `rm -rf`.
 
 Submodule branches `<prefix><name>` are retained — they're cheap and removing them across many submodules is its own footgun. Delete manually when you're confident.
+
+Because the per-worktree submodule git dirs live under `.git/worktrees/<name>/modules/<sm>/` and `git worktree prune` (below) wipes that subtree, `remove` fetches each touched submodule's `refs/heads/<prefix><name>` into the main-worktree submodule git dir (`.git/modules/<sm>/`) **before** running prune. The branch survives the prune there, addressable via `git -C <super>/<sm> log <prefix><name>`. Re-creating the worktree later (`subgrove new <name>` after a manual `git branch -D <prefix><name>` on the parent) starts the submodule branch fresh from the recorded gitlink SHA — the preserved branch lives only in the main-worktree submodule git dir.

@@ -10,7 +10,7 @@ tests/
 ├── config.sh        # remote-test URLs (committed; maintainer fills in)
 ├── lib/
 │   ├── assert.sh    # assert_eq, assert_branch_at, assert_grep, ...
-│   ├── mutators.sh  # dirty / commit_one / force_diverge / checkout_main_in
+│   ├── mutators.sh  # commit_one (state mutations beyond this are inlined per test)
 │   ├── fixture_local.sh
 │   └── fixture_remote.sh
 ├── local/           # local-only tests (no GitHub)
@@ -62,11 +62,106 @@ Each test file is one `bash` script under `set -eo pipefail`. Scenarios are comm
 
 The per-test subshell + per-scenario fixture is the only isolation. No setup/teardown helpers spanning blocks; reading the file top-to-bottom enumerates every scenario in order.
 
+## How a test runs
+
+Per scenario, the lifecycle is:
+
+1. **`mkfixture_local <name>` builds a fresh standalone fixture** at `tests/run/<timestamp>-<pid>-<random>-<name>/`. The fixture is three plain `git init` repos (`sm-a`, `sm-b`, `super`), with the two submodules wired into `super/` via `git submodule add file://…`. A `subgrove` symlink to the script under test is dropped at the super's root, and an empty `.worktree/` directory is pre-created (workaround for subgrove's `git check-ignore` on the trailing-slash pattern). See [testing-local.md](testing-local.md#test-lifecycle) for the full per-step breakdown.
+2. **The test does its work.** `cd $FIXTURE_SUPER`, invoke `./subgrove …`, capture output to a file, run assertions. All git operations are scoped to the fixture — subgrove's `$SCRIPT_DIR` resolves to the fixture (via `dirname $0` of the symlink invocation), so it never touches the surrounding subgrove repo.
+3. **`cleanup_fixture` removes the fixture — but only on success.** Called as the LAST statement of each scenario. Because every test runs under `set -eo pipefail`, an assertion failure exits the script before `cleanup_fixture` runs, leaving the fixture on disk. The runner prints the fixture path during creation; `tests/run.sh --clean` wipes the whole `tests/run/` directory.
+
+Each scenario is its own fresh repo; scenarios within a file are sequential and independent. Each test file is run in its own subshell by `tests/run.sh`, so a test's `cd` or env mutation can't bleed into the next file.
+
+## Test design principles
+
+The patterns below apply to every test in the suite, local and remote. New tests follow these idioms; deviations need a reason in a comment.
+
+### 1. Real git, no mocks
+
+Every scenario builds real repos with `git init` + `git submodule add` and runs subgrove against them. Subgrove's logic is too tangled with git's actual behavior to mock cleanly. Helpers wrap real git invocations.
+
+### 2. One fresh fixture per scenario
+
+Every scenario starts with `mkfixture_local` (or `mkfixture_remote`) and ends with `cleanup_fixture` as its last statement. No state sharing across scenarios; no setup/teardown helpers that span blocks. Failures under `set -e` exit before `cleanup_fixture` runs, leaving the fixture on disk for inspection.
+
+### 3. Pre-state verification before the operation
+
+After setup, **before invoking the command under test**, assert what the setup actually produced — clean/dirty state per location, commit counts on feat branches, specific files pending. Catches a class of bugs where the setup silently failed (e.g., a no-op `commit_one`) and the test exercises a different scenario than it claims to.
+
+The matrix tests' `_verify_pre_state` helper does this parametrically across all 6 locations.
+
+### 4. State preservation on refuse and no-op paths
+
+For any operation that refuses (dirty check, FF check) or no-ops (Phase 0 filter, sentinel skip), `snapshot_state` all relevant locations before the operation and `assert_state_eq` each one after. Catches silent side-effect bugs that state-specific assertions wouldn't see.
+
+### 5. History correctness on success paths
+
+For successful merges, `assert_ancestor` every commit between old `main` and the feat tip — verifies they're all in `main`'s history. Tip-equality alone wouldn't catch a future change from `git merge --ff-only` to `git merge --squash`: the tip would still match, but the history would differ.
+
+### 6. Specific err-text greps on refuse paths
+
+Each `require_clean` call (and similar gates) passes a unique label naming the affected location. Tests grep for the **exact** err string (e.g., `"main submodule 'sm-a' (dst) has uncommitted"`). Catches label-swap regressions where refusal still fires but with the wrong location named.
+
+### 7. Info-line greps where text encodes behavior
+
+Where subgrove's narration encodes a branch decision (`"Branching 2 submodule(s) to feat/feat-x"`, `"Submodule branching skipped (touch=none)"`, `"Preserved N submodule feat branch(es) ..."`, `"Fast-forwarding parent main"`), tests pin the text. Pure narration (`"Fetching origin/main"`, `"Initialising submodules"`) is not pinned — only lines whose content tells you _which branch of behavior was taken_.
+
+### 8. Negative assertions for skipped phases
+
+On refuse paths, negative-assert that info lines from skipped phases do NOT appear (e.g. `"Moving main forward"` must be absent on a dirty refuse — Phase 2 didn't run). Catches the case where a phase emitted its info line without actually executing.
+
+### 9. Per-file pending state, not just clean/dirty
+
+`assert_pending_file DIR FILE MODE` (MODE ∈ `none | unstaged | staged | both`) pins a specific file's pending state. `assert_pending_submodule DIR SM_PATH` covers the "M `<submodule>`" implicit-dirty case (submodule HEAD moved without parent bumping). Generic `assert_clean` / `assert_dirty` won't catch dropped-pending-edit bugs.
+
+### 10. Commit-count verification
+
+`assert_commits_ahead DIR FROM TO EXPECTED` pins exact commit counts between two refs. Used both pre-operation (verify setup) and post-operation (verify merge caught up). Catches both setup bugs and unexpected commit creation.
+
+### 11. Snapshot composition
+
+`snapshot_state` captures:
+
+- HEAD ref (symbolic) + HEAD sha
+- `git status --porcelain -uno` (tracked changes)
+- unstaged diff (`git diff`)
+- staged diff (`git diff --cached`)
+
+It deliberately **excludes** `git show-ref` because linked worktrees share parent refs with main super — a legitimate ref advance during merge would trip the snapshot. Untracked files are excluded so the test's own `out` redirect doesn't pollute the snapshot.
+
+### 12. Matrix coverage for state-sensitive commands
+
+Commands whose behavior branches on combinations of state (currently `merge` and `remove`) get parametric matrix tests iterating 2^N combinations. Each iteration:
+
+1. `mkfixture_local`
+2. `subgrove new feat-x` + sanity-check feat branches were created
+3. Apply per-iteration setup (commits via `commit_one`, dirty edits via inline `echo`)
+4. `_verify_pre_state` (asserts setup correctness for all 6 locations)
+5. Capture `snapshot_state` of relevant locations
+6. Run the operation
+7. Assert per outcome class (refuse / no-op / success)
+8. `cleanup_fixture`
+
+The matrix doesn't replace individual scenario tests — those remain as readable documentation. The matrix adds exhaustive state-tuple coverage.
+
+### 13. Symlink-based subgrove invocation
+
+Tests invoke subgrove via a symlink at `$FIXTURE_SUPER/subgrove` pointing at `$SUBGROVE_REPO_ROOT/subgrove`. The script's `SCRIPT_DIR = "$(cd "$(dirname "$0")" && pwd)"` resolves to `$FIXTURE_SUPER`, so subgrove operates on the fixture's git, never on the surrounding subgrove repo. The `new_from_other_cwd` scenario verifies this resolution holds when invoked from an arbitrary cwd.
+
+### 14. Iterative review
+
+The suite was developed through ~7 rounds of "find new weakness → apply." Each round caught a different bug class. When adding tests for a new subgrove feature, expect 2–3 rounds of review to surface:
+
+- Round 1–2: missing assertions; weak vs strong pinning of state.
+- Round 3–4: setup bugs in your own tests; symmetry gaps (sm-a tested but not sm-b).
+- Round 5–6: narration regressions; specific err-text not pinned; dead helpers.
+- Round 7+: hypothetical edge cases (diminishing returns).
+
+Real bugs surfaced across rounds so far: one subgrove bug (cmd_remove not preserving submodule branches — round 2, caught a doc/code discrepancy), one self-inflicted test bug (round 3, my own incorrect `merge_nothing` skip-list assertion).
+
 ## Per-tier case lists
 
 Every scenario, its setup, what it asserts, and which design invariant it guards:
 
-- [testing-local.md](testing-local.md) — 58 single-case scenarios + 96 parametric matrix iterations across `test_new`, `test_remove`, `test_merge`, `test_update`, `test_list`/dispatcher, plus `test_merge_matrix` and `test_remove_matrix`.
+- [testing-local.md](testing-local.md) — 67 single-case scenarios + 96 parametric matrix iterations across `test_new`, `test_remove`, `test_merge`, `test_update`, `test_list`/dispatcher, `test_linked_worktree`, plus `test_merge_matrix` and `test_remove_matrix`.
 - testing-remote.md — coming next.
-
-The longer-form design notes from the original brainstorming pass are at [docs/superpowers/specs/2026-05-15-testing-design.md](../superpowers/specs/2026-05-15-testing-design.md).

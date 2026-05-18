@@ -15,19 +15,28 @@ set -eo pipefail
 mkfixture_local update_happy
 cd "$FIXTURE_SUPER"
 ./subgrove new feat-y >out 2>&1
+# Capture feat-y/sm-b's main BEFORE — sibling sm-b doesn't move, so this
+# should be unchanged after update.
+sm_b_main_before="$(git -C .worktree/feat-y/sm-b rev-parse main)"
 # Move sibling sm-a's main forward; subgrove will fetch this into main
 # super's sm-a, then propagate via the _update_sync sentinel.
 commit_one "$FIXTURE_ROOT/sm-a" "upstream change"
 new_main="$(git -C "$FIXTURE_ROOT/sm-a" rev-parse main)"
 ./subgrove update feat-y >out 2>&1
 assert_branch_at .worktree/feat-y/sm-a main "$new_main"
+# sm-b in the peer is untouched — sibling sm-b didn't get a new commit.
+assert_branch_at .worktree/feat-y/sm-b main "$sm_b_main_before"
 cleanup_fixture
 
 # --- case: _update_sync sentinel cleaned up on success ---
+# Verifies both (a) update actually ran (FF-update info line emitted) and
+# (b) the sentinel was cleaned up afterward — the absence-of-sentinel
+# assertion alone would pass trivially if update were a complete no-op.
 mkfixture_local update_sentinel_clean
 cd "$FIXTURE_SUPER"
 ./subgrove new feat-y >out 2>&1
 ./subgrove update feat-y >out 2>&1
+assert_grep out "FF-updating peer worktree"
 if git -C sm-a rev-parse --verify --quiet refs/heads/_update_sync >/dev/null 2>&1; then
     fail "_update_sync ref leaked after update (clean run)"
 fi
@@ -53,46 +62,73 @@ cd "$FIXTURE_SUPER"
 ./subgrove new feat-y >out 2>&1
 ( cd .worktree/feat-y/sm-a && git checkout --quiet main )
 peer_main_before="$(git -C .worktree/feat-y/sm-a rev-parse main)"
+peer_state_before="$(snapshot_state .worktree/feat-y/sm-a)"
 commit_one "$FIXTURE_ROOT/sm-a" "upstream change"
 ./subgrove update feat-y >out 2>&1
 assert_grep out "main checked out"
 peer_main_after="$(git -C .worktree/feat-y/sm-a rev-parse main)"
 assert_eq "$peer_main_before" "$peer_main_after"
+# Full state preserved (HEAD on main, working tree clean at original SHA).
+assert_state_eq .worktree/feat-y/sm-a "$peer_state_before"
 cleanup_fixture
 
-# --- case: peer's main diverged → skipped ---
+# --- case: peer's main diverged → skipped; forged SHA preserved ---
 mkfixture_local update_peer_diverged
 cd "$FIXTURE_SUPER"
 ./subgrove new feat-y >out 2>&1
-(
+forged_sha=$(
     cd .worktree/feat-y/sm-a
     new_sha="$(git commit-tree -m diverge -p main "$(git rev-parse main^{tree})")"
     git update-ref refs/heads/main "$new_sha"
+    echo "$new_sha"
 )
+peer_state_before="$(snapshot_state .worktree/feat-y/sm-a)"
 commit_one "$FIXTURE_ROOT/sm-a" "upstream change"
 ./subgrove update feat-y >out 2>&1
 assert_grep out "diverged"
+# Peer's main is STILL at the forged SHA — the sentinel fetch refused
+# rather than clobbering it.
+assert_branch_at .worktree/feat-y/sm-a main "$forged_sha"
+# Full state preserved.
+assert_state_eq .worktree/feat-y/sm-a "$peer_state_before"
 cleanup_fixture
 
 # --- case: no refs/remotes/origin/main → skipped with warn ---
 # Strip origin from main super's submodules to simulate "user didn't
 # configure a remote on the submodules either." cmd_update should warn
-# and skip rather than fail.
+# and skip rather than fail. Peer mains must NOT move.
 mkfixture_local update_no_origin
 cd "$FIXTURE_SUPER"
 git -C sm-a remote remove origin
 git -C sm-b remote remove origin
 ./subgrove new feat-y >out 2>&1
+peer_a_main_before="$(git -C .worktree/feat-y/sm-a rev-parse main)"
+peer_b_main_before="$(git -C .worktree/feat-y/sm-b rev-parse main)"
+peer_a_state="$(snapshot_state .worktree/feat-y/sm-a)"
+peer_b_state="$(snapshot_state .worktree/feat-y/sm-b)"
 ./subgrove update feat-y >out 2>&1
 assert_grep out "no refs/remotes/origin/main"
+assert_branch_at .worktree/feat-y/sm-a main "$peer_a_main_before"
+assert_branch_at .worktree/feat-y/sm-b main "$peer_b_main_before"
+# Full state preserved on both peer submodules.
+assert_state_eq .worktree/feat-y/sm-a "$peer_a_state"
+assert_state_eq .worktree/feat-y/sm-b "$peer_b_state"
 cleanup_fixture
 
-# --- case: doesn't require clean state ---
+# --- case: doesn't require clean state — and dirty edit is preserved ---
+# cmd_update is ref-only. A dirty edit in the peer's submodule working
+# tree should still be there after update.
 mkfixture_local update_dirty_ok
 cd "$FIXTURE_SUPER"
 ./subgrove new feat-y >out 2>&1
 echo "dirty" >> .worktree/feat-y/sm-a/README
+assert_pending_file .worktree/feat-y/sm-a README unstaged
+state_peer_a="$(snapshot_state .worktree/feat-y/sm-a)"
 ./subgrove update feat-y >out 2>&1
+# Dirty edit + HEAD + index preserved (refs/heads/main may have moved,
+# but snapshot_state doesn't include refs).
+assert_pending_file .worktree/feat-y/sm-a README unstaged
+assert_state_eq .worktree/feat-y/sm-a "$state_peer_a"
 cleanup_fixture
 
 # --- case: nonexistent name refused ---
@@ -105,10 +141,12 @@ cleanup_fixture
 
 # --- case: multiple submodules update in one run ---
 # Both sibling sm-a and sm-b get new upstream commits. After update, both
-# peer submodules' main refs should advance independently.
+# peer submodules' main refs should advance independently. cmd_update is
+# ref-only on submodules — parent main must NOT move.
 mkfixture_local update_multi_sm
 cd "$FIXTURE_SUPER"
 ./subgrove new feat-y >out 2>&1
+parent_main_before="$(git rev-parse main)"
 commit_one "$FIXTURE_ROOT/sm-a" "upstream sm-a"
 commit_one "$FIXTURE_ROOT/sm-b" "upstream sm-b"
 new_sm_a="$(git -C "$FIXTURE_ROOT/sm-a" rev-parse main)"
@@ -116,19 +154,44 @@ new_sm_b="$(git -C "$FIXTURE_ROOT/sm-b" rev-parse main)"
 ./subgrove update feat-y >out 2>&1
 assert_branch_at .worktree/feat-y/sm-a main "$new_sm_a"
 assert_branch_at .worktree/feat-y/sm-b main "$new_sm_b"
+# Parent main never moves during update.
+assert_branch_at . main "$parent_main_before"
 cleanup_fixture
 
-# --- case: dirty main super doesn't block update ---
+# --- case: dirty main super doesn't block update — and dirty preserved ---
 # cmd_update is ref-only and doesn't `require_clean`. Dirty state in the
-# main super (parent + both submodules) should not prevent update.
+# main super (parent + both submodules) should not prevent update, and
+# every dirty edit must still be on disk afterward. Peer worktree's
+# parent + sm-b state must also be untouched (only sm-a's main moves).
 mkfixture_local update_dirty_super_ok
 cd "$FIXTURE_SUPER"
 ./subgrove new feat-y >out 2>&1
 echo "dirty parent" >> README
 echo "dirty sm-a" >> sm-a/README
 echo "dirty sm-b" >> sm-b/README
+assert_pending_file .    README unstaged
+assert_pending_file sm-a README unstaged
+assert_pending_file sm-b README unstaged
+peer_parent_state="$(snapshot_state .worktree/feat-y)"
+peer_sm_b_state="$(snapshot_state .worktree/feat-y/sm-b)"
+# Main super's submodule states should be preserved across update — the
+# fetch into refs/remotes/origin/main doesn't touch HEAD or working tree.
+# snapshot_state doesn't include refs, so the ref-only update is invisible
+# to state_eq.
+main_sm_a_state="$(snapshot_state sm-a)"
+main_sm_b_state="$(snapshot_state sm-b)"
 commit_one "$FIXTURE_ROOT/sm-a" "upstream sm-a"
 new_main="$(git -C "$FIXTURE_ROOT/sm-a" rev-parse main)"
 ./subgrove update feat-y >out 2>&1
 assert_branch_at .worktree/feat-y/sm-a main "$new_main"
+# Dirty edits in main super preserved across update.
+assert_pending_file .    README unstaged
+assert_pending_file sm-a README unstaged
+assert_pending_file sm-b README unstaged
+# Main super's submodules — HEAD + working tree + index unchanged.
+assert_state_eq sm-a "$main_sm_a_state"
+assert_state_eq sm-b "$main_sm_b_state"
+# Peer worktree's parent + sm-b untouched (only sm-a was supposed to move).
+assert_state_eq .worktree/feat-y      "$peer_parent_state"
+assert_state_eq .worktree/feat-y/sm-b "$peer_sm_b_state"
 cleanup_fixture

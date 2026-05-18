@@ -1,20 +1,12 @@
 #!/usr/bin/env bash
-# Shared mutators used by tests to construct conflict / non-FF / dirty
+# Shared mutator used by tests to construct conflict / non-FF / dirty
 # states from a clean fixture. Sourced by both fixture_local.sh and
 # fixture_remote.sh.
-
-# dirty DIR — adds an uncommitted change at DIR.
-dirty() {
-    local dir="$1"
-    ( cd "$dir" && {
-        if [[ -f README ]]; then
-            echo "dirty $$" >> README
-        else
-            echo "dirty $$" > dirty.txt
-            git add dirty.txt
-        fi
-    } )
-}
+#
+# Note: tests that need staging/divergence/checkout mutations do them
+# inline (e.g. `git checkout --detach` + `update-ref` for divergence,
+# `echo >> README` + optional `git add` for staged/unstaged dirty edits).
+# Only `commit_one` is general enough to factor out here.
 
 # commit_one REPO MSG — single-file edit + commit in REPO.
 commit_one() {
@@ -28,22 +20,4 @@ commit_one() {
         git add -A
         git commit --quiet -m "$msg"
     } )
-}
-
-# force_diverge REPO BRANCH — checks out BRANCH and commits to it, producing
-# a history that cannot fast-forward from any upstream.
-force_diverge() {
-    local repo="$1" branch="$2"
-    ( cd "$repo" && {
-        git checkout --quiet "$branch"
-        echo "diverge $$ $RANDOM" >> README
-        git add -A
-        git commit --quiet -m "diverge"
-    } )
-}
-
-# checkout_main_in DIR — switches DIR's HEAD to refs/heads/main.
-checkout_main_in() {
-    local dir="$1"
-    ( cd "$dir" && git checkout --quiet main )
 }

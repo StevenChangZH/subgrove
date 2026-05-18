@@ -17,24 +17,102 @@ commit_one .worktree/feat-x/sm-a "sm-a change"
 commit_one .worktree/feat-x/sm-b "sm-b change"
 ( cd .worktree/feat-x && git add -A && git commit --quiet -m "bump sm SHAs" )
 
+# --- PRE-merge state ---
+# Main super is clean, no commits ahead (subgrove plumbing is the baseline).
+assert_clean .
+assert_clean sm-a
+assert_clean sm-b
+assert_commits_ahead . main feat/feat-x 1 "feat parent has the bump commit"
+# Worktree side has commits but is clean (we committed everything).
+assert_clean .worktree/feat-x
+assert_clean .worktree/feat-x/sm-a
+assert_clean .worktree/feat-x/sm-b
+assert_commits_ahead .worktree/feat-x/sm-a main feat/feat-x 1 "sm-a feat has 1 commit"
+assert_commits_ahead .worktree/feat-x/sm-b main feat/feat-x 1 "sm-b feat has 1 commit"
+
 feat_super="$(git -C .worktree/feat-x rev-parse feat/feat-x)"
 feat_a="$(git -C .worktree/feat-x/sm-a rev-parse feat/feat-x)"
 feat_b="$(git -C .worktree/feat-x/sm-b rev-parse feat/feat-x)"
 
+# Capture commits that should land in main after FF (verify history, not just tip)
+feat_p_commits="$(git -C .worktree/feat-x rev-list main..feat/feat-x)"
+feat_a_commits="$(git -C .worktree/feat-x/sm-a rev-list main..feat/feat-x)"
+feat_b_commits="$(git -C .worktree/feat-x/sm-b rev-list main..feat/feat-x)"
+
+# Capture worktree state — the worktree should be retained EXACTLY as-is
+wt_state_p="$(snapshot_state .worktree/feat-x)"
+wt_state_a="$(snapshot_state .worktree/feat-x/sm-a)"
+wt_state_b="$(snapshot_state .worktree/feat-x/sm-b)"
+
 ./subgrove merge feat-x >out 2>&1
+
+# --- POST-merge state ---
+# Main super is now at feat tips, still clean (working tree updated to feat).
+assert_clean .
+assert_clean sm-a
+assert_clean sm-b
+# Feat is no longer ahead of main — main caught up.
+assert_commits_ahead . main feat/feat-x 0 "main caught up to feat"
+assert_commits_ahead . feat/feat-x main 0 "and vice versa (tip equality)"
+
+# Tip equality
 assert_branch_at . main "$feat_super"
 assert_branch_at sm-a main "$feat_a"
 assert_branch_at sm-b main "$feat_b"
-# worktree retained
+
+# History: every commit between old main and feat tip is now in main's history
+for sha in $feat_p_commits; do assert_ancestor . "$sha" main; done
+for sha in $feat_a_commits; do assert_ancestor sm-a "$sha" main; done
+for sha in $feat_b_commits; do assert_ancestor sm-b "$sha" main; done
+
+# Parent's tree records the new submodule SHAs (verifies the parent commit
+# captured the bumps, not just that the parent's main moved)
+[[ "$(git ls-tree main sm-a | awk '{print $3}')" == "$feat_a" ]] \
+    || fail "parent's tree should record sm-a at feat tip"
+[[ "$(git ls-tree main sm-b | awk '{print $3}')" == "$feat_b" ]] \
+    || fail "parent's tree should record sm-b at feat tip"
+
+# Worktree retained — full state unchanged
 assert_file_exists .worktree/feat-x
+assert_state_eq .worktree/feat-x       "$wt_state_p"
+assert_state_eq .worktree/feat-x/sm-a  "$wt_state_a"
+assert_state_eq .worktree/feat-x/sm-b  "$wt_state_b"
+# User-visible summary block names every merged submodule and the parent.
+assert_grep out "Submodules merged: *sm-a sm-b"
+assert_grep out "Parent merged: *true"
+assert_grep out "Pushed: *false"
+# Info lines reflect the actual phases that ran.
+assert_grep out "Moving main forward in main worktree's submodules"
+assert_grep out "Fast-forwarding parent main"
 cleanup_fixture
 
-# --- case: nothing to merge ---
+# --- case: nothing to merge — every location's state preserved ---
 mkfixture_local merge_nothing
 cd "$FIXTURE_SUPER"
 ./subgrove new feat-y >out 2>&1
+# Snapshot all six locations BEFORE merge.
+state_main_p="$(snapshot_state .)"
+state_main_a="$(snapshot_state sm-a)"
+state_main_b="$(snapshot_state sm-b)"
+state_wt_p="$(snapshot_state .worktree/feat-y)"
+state_wt_a="$(snapshot_state .worktree/feat-y/sm-a)"
+state_wt_b="$(snapshot_state .worktree/feat-y/sm-b)"
 ./subgrove merge feat-y >out 2>&1
 assert_grep out "Nothing to merge"
+# Nothing should have moved anywhere.
+assert_state_eq .                     "$state_main_p"
+assert_state_eq sm-a                  "$state_main_a"
+assert_state_eq sm-b                  "$state_main_b"
+assert_state_eq .worktree/feat-y      "$state_wt_p"
+assert_state_eq .worktree/feat-y/sm-a "$state_wt_a"
+assert_state_eq .worktree/feat-y/sm-b "$state_wt_b"
+# Summary block still printed even when nothing merged. With the default
+# touch=all, sm-a and sm-b were discovered as "touched" (they have feat
+# branches from `subgrove new`) but filtered into `skipped` because their
+# feat tip already equals main tip. So skipped lists both submodules.
+assert_grep out "Submodules merged: *\(none\)"
+assert_grep out "Submodules skipped: *sm-a sm-b"
+assert_grep out "Parent merged: *false"
 cleanup_fixture
 
 # --- case: partial — only one submodule has changes ---
@@ -44,13 +122,28 @@ cd "$FIXTURE_SUPER"
 commit_one .worktree/feat-p/sm-a "sm-a change"
 ( cd .worktree/feat-p && git add -A && git commit --quiet -m "bump sm-a" )
 
+feat_p="$(git -C .worktree/feat-p rev-parse feat/feat-p)"
 feat_a="$(git -C .worktree/feat-p/sm-a rev-parse feat/feat-p)"
-main_b_before="$(git -C sm-b rev-parse main)"
+feat_a_commits="$(git -C .worktree/feat-p/sm-a rev-list main..feat/feat-p)"
+sm_b_state_before="$(snapshot_state sm-b)"
+wt_state_p="$(snapshot_state .worktree/feat-p)"
+wt_state_a="$(snapshot_state .worktree/feat-p/sm-a)"
+wt_state_b="$(snapshot_state .worktree/feat-p/sm-b)"
 
 ./subgrove merge feat-p >out 2>&1
+# Parent main caught up (the bump commit landed).
+assert_branch_at . main "$feat_p"
+# sm-a advanced; every feat commit is now in main's history.
 assert_branch_at sm-a main "$feat_a"
-assert_branch_at sm-b main "$main_b_before"
-assert_grep out "skip"
+for sha in $feat_a_commits; do assert_ancestor sm-a "$sha" main; done
+# sm-b in the skipped list — state totally unchanged.
+assert_state_eq sm-b "$sm_b_state_before"
+# Worktree retained as-is across all three locations.
+assert_state_eq .worktree/feat-p      "$wt_state_p"
+assert_state_eq .worktree/feat-p/sm-a "$wt_state_a"
+assert_state_eq .worktree/feat-p/sm-b "$wt_state_b"
+# Specific skip line names sm-b (not just any word containing "skip").
+assert_grep out "skip \(no commits\):.*sm-b"
 cleanup_fixture
 
 # --- case: dirty parent (dst) — no submodule mains advance (two-phase) ---
@@ -61,27 +154,104 @@ commit_one .worktree/feat-x/sm-a "sm-a change"
 commit_one .worktree/feat-x/sm-b "sm-b change"
 ( cd .worktree/feat-x && git add -A && git commit --quiet -m "bump" )
 echo "dirty" >> README
-main_a_before="$(git -C sm-a rev-parse main)"
-main_b_before="$(git -C sm-b rev-parse main)"
+
+# --- PRE-merge state: main super README dirty, everything else clean.
+#     Feat branch is +1 commit on parent + each submodule. ---
+assert_pending_file . README unstaged "README is unstaged-modified in main super"
+assert_clean sm-a
+assert_clean sm-b
+assert_clean .worktree/feat-x
+assert_clean .worktree/feat-x/sm-a
+assert_clean .worktree/feat-x/sm-b
+assert_commits_ahead . main feat/feat-x 1 "feat parent has the bump commit"
+assert_commits_ahead .worktree/feat-x/sm-a main feat/feat-x 1
+assert_commits_ahead .worktree/feat-x/sm-b main feat/feat-x 1
+# Snapshot full state of all 6 locations BEFORE merge
+state_main_p="$(snapshot_state .)"
+state_main_a="$(snapshot_state sm-a)"
+state_main_b="$(snapshot_state sm-b)"
+state_wt_p="$(snapshot_state .worktree/feat-x)"
+state_wt_a="$(snapshot_state .worktree/feat-x/sm-a)"
+state_wt_b="$(snapshot_state .worktree/feat-x/sm-b)"
 if ./subgrove merge feat-x >out 2>&1; then
     fail "expected merge to refuse on dirty parent (dst)"
 fi
-assert_branch_at sm-a main "$main_a_before"
-assert_branch_at sm-b main "$main_b_before"
+# Err names the specific affected location (catches label-swap regressions).
+assert_grep out "main worktree \(parent, dst\) has uncommitted"
+
+# --- POST-merge state: identical to pre. README is STILL unstaged-modified;
+#     no commit landed in main; no submodule moved; worktree untouched.
+assert_pending_file . README unstaged "README still unstaged after refuse"
+assert_clean sm-a
+assert_clean sm-b
+assert_clean .worktree/feat-x
+assert_clean .worktree/feat-x/sm-a
+assert_clean .worktree/feat-x/sm-b
+assert_commits_ahead . main feat/feat-x 1 "feat still has 1 commit (not merged)"
+# Everything unchanged — refs AND working tree AND index AND the dirty edit.
+assert_state_eq .                     "$state_main_p"
+assert_state_eq sm-a                  "$state_main_a"
+assert_state_eq sm-b                  "$state_main_b"
+assert_state_eq .worktree/feat-x      "$state_wt_p"
+assert_state_eq .worktree/feat-x/sm-a "$state_wt_a"
+assert_state_eq .worktree/feat-x/sm-b "$state_wt_b"
 cleanup_fixture
 
-# --- case: dirty submodule (dst) refused ---
+# --- case: dirty submodule (dst, sm-a) refused — full state preservation ---
 mkfixture_local merge_dirty_dst_sm
 cd "$FIXTURE_SUPER"
 ./subgrove new feat-x >out 2>&1
 commit_one .worktree/feat-x/sm-a "sm-a change"
 ( cd .worktree/feat-x && git add -A && git commit --quiet -m "bump" )
 echo "dirty" >> sm-a/README
-main_a_before="$(git -C sm-a rev-parse main)"
+# Full 6-location snapshot before merge.
+state_main_p="$(snapshot_state .)"
+state_main_a="$(snapshot_state sm-a)"
+state_main_b="$(snapshot_state sm-b)"
+state_wt_p="$(snapshot_state .worktree/feat-x)"
+state_wt_a="$(snapshot_state .worktree/feat-x/sm-a)"
+state_wt_b="$(snapshot_state .worktree/feat-x/sm-b)"
 if ./subgrove merge feat-x >out 2>&1; then
     fail "expected merge to refuse on dirty submodule (dst)"
 fi
-assert_branch_at sm-a main "$main_a_before"
+assert_grep out "main submodule 'sm-a' \(dst\) has uncommitted"
+assert_state_eq .                     "$state_main_p"
+assert_state_eq sm-a                  "$state_main_a"
+assert_state_eq sm-b                  "$state_main_b"
+assert_state_eq .worktree/feat-x      "$state_wt_p"
+assert_state_eq .worktree/feat-x/sm-a "$state_wt_a"
+assert_state_eq .worktree/feat-x/sm-b "$state_wt_b"
+# Phase 1 didn't run on the dirty refusal — main super's submodules
+# don't have a feat-x branch (Phase 1 would have fetched it).
+assert_no_branch sm-a feat/feat-x
+assert_no_branch sm-b feat/feat-x
+cleanup_fixture
+
+# --- case: dirty submodule (dst, sm-b) refused — symmetry with sm-a ---
+mkfixture_local merge_dirty_dst_sm_b
+cd "$FIXTURE_SUPER"
+./subgrove new feat-x >out 2>&1
+commit_one .worktree/feat-x/sm-b "sm-b change"
+( cd .worktree/feat-x && git add -A && git commit --quiet -m "bump" )
+echo "dirty" >> sm-b/README
+state_main_p="$(snapshot_state .)"
+state_main_a="$(snapshot_state sm-a)"
+state_main_b="$(snapshot_state sm-b)"
+state_wt_p="$(snapshot_state .worktree/feat-x)"
+state_wt_a="$(snapshot_state .worktree/feat-x/sm-a)"
+state_wt_b="$(snapshot_state .worktree/feat-x/sm-b)"
+if ./subgrove merge feat-x >out 2>&1; then
+    fail "expected merge to refuse on dirty submodule (dst, sm-b)"
+fi
+assert_grep out "main submodule 'sm-b' \(dst\) has uncommitted"
+assert_state_eq .                     "$state_main_p"
+assert_state_eq sm-a                  "$state_main_a"
+assert_state_eq sm-b                  "$state_main_b"
+assert_state_eq .worktree/feat-x      "$state_wt_p"
+assert_state_eq .worktree/feat-x/sm-a "$state_wt_a"
+assert_state_eq .worktree/feat-x/sm-b "$state_wt_b"
+assert_no_branch sm-a feat/feat-x
+assert_no_branch sm-b feat/feat-x
 cleanup_fixture
 
 # --- case: non-FF parent ---
@@ -92,11 +262,23 @@ commit_one .worktree/feat-x "feat parent commit"
 echo "main-side parent change" >> README
 git add README
 git commit --quiet -m "main-side parent"
-main_super_before="$(git rev-parse main)"
+# Full state snapshot — main's SHA alone isn't enough; verify ALL refs +
+# working trees + indices stay put across the refuse.
+state_main_p="$(snapshot_state .)"
+state_main_a="$(snapshot_state sm-a)"
+state_main_b="$(snapshot_state sm-b)"
+state_wt_p="$(snapshot_state .worktree/feat-x)"
+state_wt_a="$(snapshot_state .worktree/feat-x/sm-a)"
+state_wt_b="$(snapshot_state .worktree/feat-x/sm-b)"
 if ./subgrove merge feat-x >out 2>&1; then
     fail "expected merge to refuse on non-FF parent"
 fi
-assert_branch_at . main "$main_super_before"
+assert_state_eq .                     "$state_main_p"
+assert_state_eq sm-a                  "$state_main_a"
+assert_state_eq sm-b                  "$state_main_b"
+assert_state_eq .worktree/feat-x      "$state_wt_p"
+assert_state_eq .worktree/feat-x/sm-a "$state_wt_a"
+assert_state_eq .worktree/feat-x/sm-b "$state_wt_b"
 cleanup_fixture
 
 # --- case: non-FF submodule (two-phase invariant) ---
@@ -116,14 +298,38 @@ commit_one .worktree/feat-x/sm-b "sm-b feat change"
     new_sha="$(git commit-tree -m diverge -p main "$(git rev-parse main^{tree})")"
     git update-ref refs/heads/main "$new_sha"
 )
-main_a_before="$(git -C sm-a rev-parse main)"
-main_b_before="$(git -C sm-b rev-parse main)"
+
+# --- PRE-merge state ---
+# Main super parent + sm-a clean. sm-b has a forged-divergent main (its
+# refs/heads/main is now 1 commit ahead of its earlier baseline) but the
+# working tree is at the detached baseline SHA → no pending changes there.
+sm_a_main_before="$(git -C sm-a rev-parse main)"
+sm_b_main_before="$(git -C sm-b rev-parse main)"
+assert_clean .
+assert_clean sm-a
+assert_clean sm-b
+# Worktree side has commits and is clean.
+assert_clean .worktree/feat-x
+assert_clean .worktree/feat-x/sm-a
+assert_clean .worktree/feat-x/sm-b
+assert_commits_ahead .worktree/feat-x/sm-a main feat/feat-x 1
+assert_commits_ahead .worktree/feat-x/sm-b main feat/feat-x 1
+state_main_a="$(snapshot_state sm-a)"
+state_main_b="$(snapshot_state sm-b)"
 if ./subgrove merge feat-x >out 2>&1; then
     fail "expected merge to refuse on non-FF sm-b"
 fi
-# THE invariant: sm-a's main UNCHANGED despite sm-b's failure.
-assert_branch_at sm-a main "$main_a_before"
-assert_branch_at sm-b main "$main_b_before"
+
+# --- POST-merge state: THE two-phase invariant ---
+# sm-a's main UNCHANGED (Phase 2 never ran for any module).
+# sm-b's main UNCHANGED (forged-divergent SHA still there).
+# Both still clean.
+assert_branch_at sm-a main "$sm_a_main_before"
+assert_branch_at sm-b main "$sm_b_main_before"
+assert_clean sm-a
+assert_clean sm-b
+assert_state_eq sm-a "$state_main_a"
+assert_state_eq sm-b "$state_main_b"
 cleanup_fixture
 
 # --- case: peer propagation (clean peer) ---
@@ -134,10 +340,16 @@ cd "$FIXTURE_SUPER"
 commit_one .worktree/feat-x/sm-a "sm-a change"
 ( cd .worktree/feat-x && git add -A && git commit --quiet -m "bump" )
 
+# Peer feat-y has no changes — sm-b in particular should be untouched
+# because only sm-a is in needs_merge for the propagation loop.
+feat_y_sm_b_state="$(snapshot_state .worktree/feat-y/sm-b)"
+
 ./subgrove merge feat-x >out 2>&1
 
 feat_a="$(git -C .worktree/feat-x/sm-a rev-parse feat/feat-x)"
 assert_branch_at .worktree/feat-y/sm-a main "$feat_a"
+# Peer's sm-b not in needs_merge — totally unchanged.
+assert_state_eq .worktree/feat-y/sm-b "$feat_y_sm_b_state"
 cleanup_fixture
 
 # --- case: peer with main checked out → propagation skipped ---
@@ -147,6 +359,7 @@ cd "$FIXTURE_SUPER"
 ./subgrove new feat-y >out 2>&1
 ( cd .worktree/feat-y/sm-a && git checkout --quiet main )
 peer_main_before="$(git -C .worktree/feat-y/sm-a rev-parse main)"
+peer_state_before="$(snapshot_state .worktree/feat-y/sm-a)"
 
 commit_one .worktree/feat-x/sm-a "sm-a change"
 ( cd .worktree/feat-x && git add -A && git commit --quiet -m "bump" )
@@ -155,24 +368,32 @@ commit_one .worktree/feat-x/sm-a "sm-a change"
 assert_grep out "main checked out"
 peer_main_after="$(git -C .worktree/feat-y/sm-a rev-parse main)"
 assert_eq "$peer_main_before" "$peer_main_after"
+# Full state preserved — HEAD still on main, working tree at original SHA.
+assert_state_eq .worktree/feat-y/sm-a "$peer_state_before"
 cleanup_fixture
 
-# --- case: peer's main diverged → propagation skipped ---
+# --- case: peer's main diverged → propagation skipped; forged SHA preserved ---
 mkfixture_local merge_peer_diverged
 cd "$FIXTURE_SUPER"
 ./subgrove new feat-x >out 2>&1
 ./subgrove new feat-y >out 2>&1
-(
+forged_sha=$(
     cd .worktree/feat-y/sm-a
     new_sha="$(git commit-tree -m diverge -p main "$(git rev-parse main^{tree})")"
     git update-ref refs/heads/main "$new_sha"
+    echo "$new_sha"
 )
+peer_state_before="$(snapshot_state .worktree/feat-y/sm-a)"
 
 commit_one .worktree/feat-x/sm-a "sm-a change"
 ( cd .worktree/feat-x && git add -A && git commit --quiet -m "bump" )
 
 ./subgrove merge feat-x >out 2>&1
 assert_grep out "diverged"
+# Peer's main is STILL at the forged SHA — propagation didn't clobber it.
+assert_branch_at .worktree/feat-y/sm-a main "$forged_sha"
+# Full state preserved (HEAD on feat/feat-y, working tree at feat tip).
+assert_state_eq .worktree/feat-y/sm-a "$peer_state_before"
 cleanup_fixture
 
 # --- case: nonexistent branch refused ---
@@ -183,6 +404,37 @@ if ./subgrove merge never-existed >out 2>&1; then
 fi
 cleanup_fixture
 
+# --- case: parent-only commit (touch=none) ---
+# Exercises the code path where parent_needs_merge=true but needs_merge is
+# empty. Phase 1's submodule loop doesn't iterate; Phase 1's parent FF
+# check runs alone; Phase 2's submodule loop is empty; parent FF-merge
+# advances main.
+mkfixture_local merge_parent_only
+cd "$FIXTURE_SUPER"
+./subgrove new feat-x touch=none >out 2>&1
+# touch=none leaves submodules detached without feat branches.
+assert_no_branch .worktree/feat-x/sm-a feat/feat-x
+assert_no_branch .worktree/feat-x/sm-b feat/feat-x
+
+commit_one .worktree/feat-x "parent-only change"
+feat_parent="$(git -C .worktree/feat-x rev-parse feat/feat-x)"
+feat_commits="$(git -C .worktree/feat-x rev-list main..feat/feat-x)"
+sm_a_main_before="$(git -C sm-a rev-parse main)"
+sm_b_main_before="$(git -C sm-b rev-parse main)"
+
+./subgrove merge feat-x >out 2>&1
+
+# Parent main caught up; every feat commit reachable from new main.
+assert_branch_at . main "$feat_parent"
+for sha in $feat_commits; do assert_ancestor . "$sha" main; done
+# No submodule mains moved — none were in needs_merge.
+assert_branch_at sm-a main "$sm_a_main_before"
+assert_branch_at sm-b main "$sm_b_main_before"
+# Summary reflects the parent-only merge accurately.
+assert_grep out "Submodules merged: *\(none\)"
+assert_grep out "Parent merged: *true"
+cleanup_fixture
+
 # --- case: dirty source parent (feature worktree) refused ---
 mkfixture_local merge_dirty_src_parent
 cd "$FIXTURE_SUPER"
@@ -190,11 +442,24 @@ cd "$FIXTURE_SUPER"
 commit_one .worktree/feat-x/sm-a "sm-a change"
 ( cd .worktree/feat-x && git add -A && git commit --quiet -m "bump" )
 echo "dirty src" >> .worktree/feat-x/README
-main_a_before="$(git -C sm-a rev-parse main)"
+state_main_p="$(snapshot_state .)"
+state_main_a="$(snapshot_state sm-a)"
+state_main_b="$(snapshot_state sm-b)"
+state_wt_p="$(snapshot_state .worktree/feat-x)"
+state_wt_a="$(snapshot_state .worktree/feat-x/sm-a)"
+state_wt_b="$(snapshot_state .worktree/feat-x/sm-b)"
 if ./subgrove merge feat-x >out 2>&1; then
     fail "expected merge to refuse on dirty src parent"
 fi
-assert_branch_at sm-a main "$main_a_before"
+assert_grep out "feature worktree \(parent, src\) has uncommitted"
+assert_state_eq .                     "$state_main_p"
+assert_state_eq sm-a                  "$state_main_a"
+assert_state_eq sm-b                  "$state_main_b"
+assert_state_eq .worktree/feat-x      "$state_wt_p"
+assert_state_eq .worktree/feat-x/sm-a "$state_wt_a"
+assert_state_eq .worktree/feat-x/sm-b "$state_wt_b"
+assert_no_branch sm-a feat/feat-x
+assert_no_branch sm-b feat/feat-x
 cleanup_fixture
 
 # --- case: dirty source submodule (feature worktree) refused ---
@@ -204,11 +469,24 @@ cd "$FIXTURE_SUPER"
 commit_one .worktree/feat-x/sm-a "sm-a change"
 ( cd .worktree/feat-x && git add -A && git commit --quiet -m "bump" )
 echo "dirty src" >> .worktree/feat-x/sm-a/README
-main_a_before="$(git -C sm-a rev-parse main)"
+state_main_p="$(snapshot_state .)"
+state_main_a="$(snapshot_state sm-a)"
+state_main_b="$(snapshot_state sm-b)"
+state_wt_p="$(snapshot_state .worktree/feat-x)"
+state_wt_a="$(snapshot_state .worktree/feat-x/sm-a)"
+state_wt_b="$(snapshot_state .worktree/feat-x/sm-b)"
 if ./subgrove merge feat-x >out 2>&1; then
     fail "expected merge to refuse on dirty src submodule"
 fi
-assert_branch_at sm-a main "$main_a_before"
+assert_grep out "feature submodule 'sm-a' \(src\) has uncommitted"
+assert_state_eq .                     "$state_main_p"
+assert_state_eq sm-a                  "$state_main_a"
+assert_state_eq sm-b                  "$state_main_b"
+assert_state_eq .worktree/feat-x      "$state_wt_p"
+assert_state_eq .worktree/feat-x/sm-a "$state_wt_a"
+assert_state_eq .worktree/feat-x/sm-b "$state_wt_b"
+assert_no_branch sm-a feat/feat-x
+assert_no_branch sm-b feat/feat-x
 cleanup_fixture
 
 # --- case: peer propagation reaches multiple peer worktrees ---
@@ -220,9 +498,22 @@ cd "$FIXTURE_SUPER"
 commit_one .worktree/feat-x/sm-a "sm-a change"
 ( cd .worktree/feat-x && git add -A && git commit --quiet -m "bump" )
 
+# Both peers' sm-b should be untouched — only sm-a is in needs_merge.
+feat_y_sm_b_state="$(snapshot_state .worktree/feat-y/sm-b)"
+feat_z_sm_b_state="$(snapshot_state .worktree/feat-z/sm-b)"
+sm_b_main_before="$(git -C sm-b rev-parse main)"
+
 ./subgrove merge feat-x >out 2>&1
 
 feat_a="$(git -C .worktree/feat-x/sm-a rev-parse feat/feat-x)"
+feat_parent="$(git -C .worktree/feat-x rev-parse feat/feat-x)"
+# Main super advanced for parent + sm-a; sm-b stays put (no commits there).
+assert_branch_at . main "$feat_parent"
+assert_branch_at sm-a main "$feat_a"
+assert_branch_at sm-b main "$sm_b_main_before"
+# Both peers' sm-a advanced; both peers' sm-b unchanged.
 assert_branch_at .worktree/feat-y/sm-a main "$feat_a"
 assert_branch_at .worktree/feat-z/sm-a main "$feat_a"
+assert_state_eq .worktree/feat-y/sm-b "$feat_y_sm_b_state"
+assert_state_eq .worktree/feat-z/sm-b "$feat_z_sm_b_state"
 cleanup_fixture

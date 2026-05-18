@@ -312,12 +312,40 @@ cmd_remove() {
         done < <(list_all_submodules)
     fi
 
+    # Preserve any submodule feat branches by fetching them into main
+    # worktree's submodule git dirs BEFORE prune wipes the per-worktree
+    # submodule storage. Per lifecycle.md, "submodule branches are retained"
+    # — without this preservation, `git worktree prune` (below) cleans
+    # .git/worktrees/<name>/modules/<sm>/ and any refs there go with it.
+    # After remove, the user can access these preserved branches from main
+    # worktree's submodule (e.g. `git -C <super>/<sm> log feat/<name>`).
+    local branch_to_preserve="${BRANCH_PREFIX}$name"
+    local sm sm_path main_sm_path
+    local preserved=0
+    while IFS= read -r sm; do
+        sm_path="$wt_path/$sm"
+        [[ -e "$sm_path/.git" ]] || continue
+        git -C "$sm_path" rev-parse --verify --quiet "refs/heads/$branch_to_preserve" >/dev/null 2>&1 \
+            || continue
+        main_sm_path="$SCRIPT_DIR/$sm"
+        [[ -d "$SCRIPT_DIR/.git/modules/$sm" ]] || continue
+        if git -C "$main_sm_path" fetch --quiet "$sm_path" \
+                "+refs/heads/$branch_to_preserve:refs/heads/$branch_to_preserve" 2>/dev/null; then
+            preserved=$((preserved + 1))
+        else
+            echo "    warn: $sm: failed to preserve refs/heads/$branch_to_preserve"
+        fi
+    done < <(list_all_submodules)
+    if [[ "$preserved" -gt 0 ]]; then
+        info "Preserved $preserved submodule feat branch(es) into main worktree's submodule git dirs"
+    fi
+
     # `git worktree remove` refuses on worktrees containing submodules (git 2.40+;
     # --force does not bypass it). The cleanliness gate above is our equivalent
-    # safety check; the actual removal is a direct rm + prune.
-    # `git worktree prune` recursively cleans .git/worktrees/<name>/ including
-    # the submodule git dirs nested under it (modules/<sm>/), so no additional
-    # per-submodule cleanup is needed for this layout.
+    # safety check; the actual removal is a direct rm + prune. `git worktree
+    # prune` recursively cleans .git/worktrees/<name>/ including the submodule
+    # git dirs nested under it (modules/<sm>/) — which is why we preserved the
+    # feat branches above first.
     info "Removing worktree at $wt_path (branches retained)"
     rm -rf "$wt_path"
     git worktree prune
