@@ -55,6 +55,8 @@ The remote tier (`tests/remote/`) pins the same byte-identical preservation acro
 
 The two parametric remote matrices (`test_merge_push_matrix.sh` with 8 cells over per-package origin state `{even, ahead}^3`, `test_update_matrix.sh` with 16 cells over per-sm `{origin: even, ahead} × {peer: clean, local}`) apply the worktree-preservation snapshot to every cell. See [testing-remote.md](testing-remote.md) for the per-scenario tables and the wire-specific invariants (FF-only push, push-order half-state, baseline-tag reset between cells).
 
+The no-submodule remote tier (`tests/remote-no-sm/`) enforces the identical contract on a no-`.gitmodules` super, with the per-package locations collapsing to just the parent: `merge push=true` (and `merge` push=false) preserve the source feat worktree on every case incl. refuse; `update` preserves main super + peer worktree on every case; `remove` preserves main super on every case incl. the `-f` force variants and the multi-worktree case; `new` preserves main super. Success `merge` cases additionally carry `assert_ancestor` for history correctness. The only un-snapshotted paths are `new`'s early-validation refuses, which fire before any mutation. See [testing-remote-no-sm.md](testing-remote-no-sm.md) for the per-scenario tables.
+
 ## Edge cases worth knowing about
 
 None are observed failures or active rule violations. They're places where the contract has a thin edge that future code or unusual user states could push past — recorded so they don't have to be re-derived.

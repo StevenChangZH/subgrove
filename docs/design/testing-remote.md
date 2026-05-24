@@ -9,7 +9,7 @@ The remote tier exercises paths the local fixtures can't:
 - Subgrove's push order on multi-package failures (sm-a → sm-b → super; set -e abort on first failed push).
 - Per-package origin drift across `update` and `merge push=true` — the matrix tier exhausts the relevant state combinations.
 
-Companion to [testing-local.md](testing-local.md) and [testing-local-no-sm.md](testing-local-no-sm.md).
+Companion to [testing-local.md](testing-local.md), [testing-local-no-sm.md](testing-local-no-sm.md), and [testing-remote-no-sm.md](testing-remote-no-sm.md).
 
 43 scenarios across six files (5 + 7 + 8-cell matrix + 5 + 16-cell matrix + 2).
 
@@ -194,7 +194,7 @@ These paths are covered by the local tiers and don't gain from wire repetition:
 - The dirty-refuse matrix (2^6 combinations across parent + sm-a + sm-b × staged variants) — covered by `tests/local/test_merge_matrix.sh`. Repeating it over the wire would add ~30 minutes for the same logical coverage.
 - `subgrove list`, the linked-worktree refusal, and `assert_main_worktree` — pure parent-side flows; not wire-dependent.
 
-The no-submodule tier (`tests/local-no-sm/`) has no remote counterpart. Adding a fourth fixture URL for a no-submodule super buys little over what `local-no-sm/` already covers — the gap subgrove fills is fundamentally about submodules, and the no-submodule tier exists to verify graceful degradation rather than core behavior. Deferred until a concrete need arises.
+The no-submodule tier (`tests/local-no-sm/`) now has a remote counterpart under `tests/remote-no-sm/`. It uses a fourth fixture URL (`SUBGROVE_TEST_SUPER_NO_SM_URL` in `tests/config.sh`) and lazily bootstraps its baseline inside the fixture rather than via a separate init script. See [testing-remote-no-sm.md](testing-remote-no-sm.md) for the per-scenario tables and the wire-only paths that tier pins (the `new` parent-base-from-origin, `update` parent-fetch-succeeds, `merge push=true` happy path, and `remove`-doesn't-touch-origin invariants on a no-sm super).
 
 ## Cross-reference
 

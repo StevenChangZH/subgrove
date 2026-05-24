@@ -33,7 +33,15 @@ fi
 
 # Propagated to every child git invocation. user.{email,name} so that
 # freshly-init'd repos can commit without per-repo config.
-export GIT_CONFIG_PARAMETERS="'protocol.file.allow=always' 'user.email=test@subgrove.local' 'user.name=Subgrove Tests'"
+#
+# Intentionally OMITS `protocol.file.allow=always` (the CVE-2022-39253
+# workaround used by the local fixtures): the remote tier uses SSH/HTTPS
+# URLs only — there's no legitimate file:// remote in any remote test.
+# Keeping the protection enabled is defense in depth: if a future subgrove
+# regression ever caused it to clone an attacker-controlled file:// URL
+# (e.g. via a poisoned .gitmodules in the fetched super), the protection
+# would block it.
+export GIT_CONFIG_PARAMETERS="'user.email=test@subgrove.local' 'user.name=Subgrove Tests'"
 
 FIXTURE_ROOT=""
 FIXTURE_SUPER=""
@@ -114,19 +122,21 @@ mkfixture_remote() {
         # One-time URL banner for the script. Surfaces the targets that
         # this script will force-push to (per-test resets + any push=true
         # test) so a developer notices URL typos before tests start
-        # nuking the wrong repos.
+        # nuking the wrong repos. URLs are redacted via _redact_url so
+        # an HTTPS-with-PAT env override doesn't leak credentials into
+        # the captured test output / CI logs.
         cat >&2 <<EOF
   remote test targets (force-push reachable):
-    super: $SUBGROVE_TEST_SUPER_URL
-    sm-a:  $SUBGROVE_TEST_SM_URL
-    sm-b:  $SUBGROVE_TEST_SM_URL2
+    super: $(_redact_url "$SUBGROVE_TEST_SUPER_URL")
+    sm-a:  $(_redact_url "$SUBGROVE_TEST_SM_URL")
+    sm-b:  $(_redact_url "$SUBGROVE_TEST_SM_URL2")
 EOF
         if git ls-remote -- "$SUBGROVE_TEST_SUPER_URL" refs/tags/subgrove-test-lock 2>/dev/null \
                 | grep -q refs/tags/subgrove-test-lock; then
-            echo "Remote tests: lock tag exists on $SUBGROVE_TEST_SUPER_URL." >&2
+            echo "Remote tests: lock tag exists on $(_redact_url "$SUBGROVE_TEST_SUPER_URL")." >&2
             echo "  Another run may be in progress, or a previous run died." >&2
             echo "  Clear with:" >&2
-            echo "    git push '$SUBGROVE_TEST_SUPER_URL' :refs/tags/subgrove-test-lock" >&2
+            echo "    git push '$(_redact_url "$SUBGROVE_TEST_SUPER_URL")' :refs/tags/subgrove-test-lock" >&2
             exit 1
         fi
         _push_lock_tag
@@ -164,6 +174,12 @@ _push_lock_tag() {
         git config user.name  "Subgrove Tests"
         git commit --quiet --allow-empty -m "lock"
         git tag subgrove-test-lock
+        # IMPORTANT: this `git push` MUST NOT use `--force`. Tag-uniqueness
+        # at the server is what closes the TOCTOU window between our
+        # `ls-remote` check above and the push here: a concurrent run that
+        # passed the same check loses this race (its push is rejected
+        # with "would clobber existing tag") and exits cleanly under
+        # `set -e`. Adding `--force` would silently break the lock.
         git push --quiet -- "$SUBGROVE_TEST_SUPER_URL" refs/tags/subgrove-test-lock
     )
     SUBGROVE_TEST_LOCK_HELD=1
@@ -205,7 +221,7 @@ _fixture_remote_teardown() {
                 printf '%s\n' "$lock_err" | sed 's/^/  /' >&2
             fi
             echo "  Clear manually with:" >&2
-            echo "    git push '$SUBGROVE_TEST_SUPER_URL' :refs/tags/subgrove-test-lock" >&2
+            echo "    git push '$(_redact_url "$SUBGROVE_TEST_SUPER_URL")' :refs/tags/subgrove-test-lock" >&2
             # Don't override the test's own exit code with the lock-release
             # failure, but do surface a non-zero rc if the test itself passed.
             [[ $rc -eq 0 ]] && rc=75   # EX_TEMPFAIL

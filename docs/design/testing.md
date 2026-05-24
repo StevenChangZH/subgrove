@@ -7,17 +7,19 @@ Subgrove ships with a real-git test suite under `tests/`. Subgrove's logic is to
 ```
 tests/
 ├── run.sh           # entry point; runs all tests or a filtered subset
-├── init_remote.sh   # one-time bootstrap of the remote fixture repos
+├── init_remote.sh   # one-time bootstrap of the with-sm remote fixture repos
 ├── config.sh        # remote-test URLs (committed; maintainer fills in)
 ├── lib/
 │   ├── assert.sh    # assert_eq, assert_branch_at, assert_grep, ...
 │   ├── mutators.sh  # commit_one + push_to_origin_main (side-clone helpers)
 │   ├── fixture_local.sh
 │   ├── fixture_local_no_sm.sh
-│   └── fixture_remote.sh
+│   ├── fixture_remote.sh
+│   └── fixture_remote_no_sm.sh
 ├── local/           # local-only tests (no GitHub), with-submodule fixture
 ├── local-no-sm/     # local-only tests, no-submodule fixture
-├── remote/          # tests that push to real GitHub
+├── remote/          # tests that push to real GitHub, with-submodule fixture
+├── remote-no-sm/    # tests that push to real GitHub, no-submodule fixture
 └── run/             # gitignored; per-test fixtures land here at runtime
 ```
 
@@ -51,7 +53,7 @@ Full design, scenarios, and per-file case lists live in [testing-local-no-sm.md]
 3. **Submodule-relevant parameters never crash on a no-sm super.** `touch=<sm>`, multi-name `touch=`, `BUILD_CHAIN=(<sm>)`, `merge push=true` — each errs cleanly with rollback (where applicable) or produces a defined no-op.
 4. **Parent-only flows are isolated from submodule machinery** (no `_update_sync` ref leaks; "Preserved N submodule branch(es)" line absent on no-sm `remove`).
 
-Run with `tests/run.sh --local-only`, which discovers both `local/` and `local-no-sm/`. The remote tier does not have a no-submodule counterpart — the existing remote tests already require three GitHub URLs, and adding a fourth fixture URL buys little over what `local-no-sm/` already covers. Deferred until a concrete need arises.
+Run with `tests/run.sh --local-only`, which discovers both `local/` and `local-no-sm/`. The remote tier has a no-submodule counterpart under `tests/remote-no-sm/` (uses a fourth fixture URL, `SUBGROVE_TEST_SUPER_NO_SM_URL`, and lazily bootstraps its baseline inside the fixture rather than via `init_remote.sh`). See [testing-remote-no-sm.md](testing-remote-no-sm.md) for what that tier guards.
 
 ## Remote tests (opt-in, default-on when configured)
 
@@ -87,7 +89,9 @@ The remote tests are **intentionally serial**. The lock turns a parallel run fro
 
 Multi-submodule scenarios over the wire — `push=true` advancing every origin, partial `update` where only one submodule moved, push order on multi-package failures (sm-a → sm-b → super; set -e abort on first), per-package origin-drift matrices for both `merge push=true` and `update` — are covered here. The two-phase merge half-state invariant stays local-only: forging a divergent submodule commit while keeping the parent clean is awkward over the wire without an extra contributor clone.
 
-Full case lists in [testing-remote.md](testing-remote.md).
+The no-submodule remote tier (`tests/remote-no-sm/`) pins wire-only paths that neither the with-sm remote tier nor the local-no-sm tier can reach: the `new` parent-base-from-origin, `update`'s real `git fetch origin main`, the `merge push=true` happy path on a no-sm super, and the `remove`-doesn't-touch-origin invariant. Its fixture lazily bootstraps the baseline on first call — no separate init script.
+
+Full case lists in [testing-remote.md](testing-remote.md) and [testing-remote-no-sm.md](testing-remote-no-sm.md).
 
 ## Conventions
 
@@ -198,4 +202,5 @@ Every scenario, its setup, what it asserts, and which design invariant it guards
 
 - [testing-local.md](testing-local.md) — with-submodule local scenarios (67 single-case + 96 parametric matrix iterations).
 - [testing-local-no-sm.md](testing-local-no-sm.md) — no-submodule local tier.
-- [testing-remote.md](testing-remote.md) — remote tier (19 single-case + 24 parametric matrix iterations against real GitHub).
+- [testing-remote.md](testing-remote.md) — with-submodule remote tier (19 single-case + 24 parametric matrix iterations against real GitHub).
+- [testing-remote-no-sm.md](testing-remote-no-sm.md) — no-submodule remote tier (48 single-case + 8 parametric matrix iterations against real GitHub).

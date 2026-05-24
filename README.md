@@ -102,7 +102,7 @@ A real-git test suite lives under `tests/`. No mocks — each scenario builds a 
 ./tests/run.sh --clean            # wipe tests/run/ (kept fixtures from failed scenarios)
 ```
 
-Remote tests push to three GitHub repos configured in [`tests/config.sh`](tests/config.sh). After filling those URLs in, run `tests/init_remote.sh` once to bootstrap the fixture repos with a baseline commit + tag; subsequent test runs reset to that tag rather than rewriting history each time. Fixtures land under `tests/run/` (gitignored).
+Remote tests push to four GitHub repos configured in [`tests/config.sh`](tests/config.sh): three for the with-submodule tier (run `tests/init_remote.sh` once to bootstrap them) and one for the no-submodule tier (`tests/remote-no-sm/` — its fixture lazily bootstraps the baseline on first use, no separate init step). Subsequent test runs reset to the baseline tag rather than rewriting history each time. Fixtures land under `tests/run/` (gitignored).
 
 The patterns the suite uses (pre/post state verification, snapshot equality on refuse, history-ancestor on success, specific err-text and info-line greps, matrix coverage for state-sensitive commands) are documented in [docs/design/testing.md § Test design principles](docs/design/testing.md#test-design-principles). Adding new tests should follow those.
 

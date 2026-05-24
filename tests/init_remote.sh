@@ -66,6 +66,19 @@ _require_var() {
     fi
 }
 
+# _redact_url URL — strip userinfo from URL for safe stderr printing.
+# Inline copy of mutators.sh::_redact_url since init_remote.sh doesn't
+# source it. Keep the two implementations in sync. The `.*@` match is
+# greedy on purpose so a password containing a literal `@` is fully
+# masked (see the fuller rationale in mutators.sh).
+_redact_url() {
+    local url="$1"
+    case "$url" in
+        *://*@*) printf '%s\n' "$url" | sed -E 's|://.*@|://REDACTED@|' ;;
+        *)       printf '%s\n' "$url" ;;
+    esac
+}
+
 _require_var SUBGROVE_TEST_SUPER_URL
 _require_var SUBGROVE_TEST_SM_URL
 _require_var SUBGROVE_TEST_SM_URL2
@@ -90,14 +103,16 @@ fi
 # About to force-push three histories — surface the URLs and require a
 # human Y/n before doing it. Bypassable with --yes for scripted/CI use.
 # Without this, a typo in tests/config.sh would silently nuke whatever
-# the URLs happen to point at.
+# the URLs happen to point at. URLs are redacted before display so an
+# HTTPS-with-PAT env override doesn't leak credentials into terminal
+# scrollback / typescripts.
 cat >&2 <<EOF
 
 About to force-push initial baseline + 'subgrove-baseline' tag to:
 
-  super: $SUBGROVE_TEST_SUPER_URL
-  sm-a:  $SUBGROVE_TEST_SM_URL
-  sm-b:  $SUBGROVE_TEST_SM_URL2
+  super: $(_redact_url "$SUBGROVE_TEST_SUPER_URL")
+  sm-a:  $(_redact_url "$SUBGROVE_TEST_SM_URL")
+  sm-b:  $(_redact_url "$SUBGROVE_TEST_SM_URL2")
 
 This OVERWRITES whatever 'main' currently points to on each repo. Make
 sure these URLs are dedicated subgrove test repos and NOT a real project.
@@ -122,10 +137,10 @@ fi
 # race with a concurrent test run. Released on EXIT/INT/TERM.
 if git ls-remote -- "$SUBGROVE_TEST_SUPER_URL" refs/tags/subgrove-test-lock 2>/dev/null \
         | grep -q refs/tags/subgrove-test-lock; then
-    echo "init_remote.sh: lock tag exists on $SUBGROVE_TEST_SUPER_URL." >&2
+    echo "init_remote.sh: lock tag exists on $(_redact_url "$SUBGROVE_TEST_SUPER_URL")." >&2
     echo "  A remote test may be running, or a previous run died." >&2
     echo "  Clear with:" >&2
-    echo "    git push '$SUBGROVE_TEST_SUPER_URL' :refs/tags/subgrove-test-lock" >&2
+    echo "    git push '$(_redact_url "$SUBGROVE_TEST_SUPER_URL")' :refs/tags/subgrove-test-lock" >&2
     exit 1
 fi
 
@@ -146,7 +161,7 @@ _teardown() {
                 printf '%s\n' "$lock_err" | sed 's/^/  /' >&2
             fi
             echo "  Clear manually with:" >&2
-            echo "    git push '$SUBGROVE_TEST_SUPER_URL' :refs/tags/subgrove-test-lock" >&2
+            echo "    git push '$(_redact_url "$SUBGROVE_TEST_SUPER_URL")' :refs/tags/subgrove-test-lock" >&2
         fi
     fi
     rm -rf "$INIT_TMP"
@@ -172,7 +187,7 @@ LOCK_HELD=1
 _init_sm() {
     local label="$1" url="$2"
     local seed="$INIT_TMP/_seed_$label"
-    echo "  init $label: $url"
+    echo "  init $label: $(_redact_url "$url")"
     git init --quiet "$seed"
     (
         cd "$seed"
@@ -192,7 +207,7 @@ _init_sm() {
 # every test relies on.
 _init_super() {
     local seed="$INIT_TMP/_super_seed"
-    echo "  init super: $SUBGROVE_TEST_SUPER_URL"
+    echo "  init super: $(_redact_url "$SUBGROVE_TEST_SUPER_URL")"
     git init --quiet "$seed"
     (
         cd "$seed"

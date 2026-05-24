@@ -40,7 +40,7 @@ cleanup_fixture
 # --- case: touch=none explicit ---
 # Verify the explicit-none path emits the same narration as the empty-set
 # default path. This documents that subgrove does NOT distinguish the two
-# cases today (see addendum in 2026-05-15-testing-design.md).
+# cases today (see implementation notes in docs/design/testing-local-no-sm.md).
 mkfixture_local_no_sm new_touch_none
 cd "$FIXTURE_SUPER"
 ./subgrove new feat-z touch=none >out 2>&1

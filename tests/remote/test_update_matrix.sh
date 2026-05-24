@@ -58,7 +58,14 @@ _setup_sm() {
     fi
 
     if [[ "$origin_state" == "ahead" ]]; then
-        new_origin_sha="$(push_to_origin_main "$url" "upstream $sm")"
+        # `|| return 1`: push_to_origin_main fails loud via `exit 1`, but
+        # _setup_sm runs inside `exp_a="$(_setup_sm ...)"` — a nested
+        # command substitution. Under bash 3.2 (no inherit_errexit) the
+        # inner `exit` aborts only THIS subshell, not the outer one, so
+        # without the explicit `|| return 1` a failed push would let
+        # _setup_sm continue and echo a stale/garbage value. The return
+        # converts it into an rc the outer assignment's set -e honors.
+        new_origin_sha="$(push_to_origin_main "$url" "upstream $sm")" || return 1
     fi
 
     case "${origin_state}/${peer_state}" in
