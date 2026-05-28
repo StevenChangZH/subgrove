@@ -159,3 +159,24 @@ assert_state_eq .worktree/feat-y "$state_wt"   "[dirty_ok] peer"
 # §15: status reflects the resulting state (update retains the worktree).
 assert_status feat-y "feat/feat-y"
 cleanup_fixture_remote_no_sm
+
+# --- case: rebase=ff on a no-sm super — degenerate, nothing to rebase ---
+# Companion to local-no-sm's update_rebase_ff_degenerate, over the wire.
+# Zero submodules → the FF phase reports everything caught up and prints
+# no submodule foreach hint. update stays ref-only on the parent.
+mkfixture_remote_no_sm update_rebase_ff_degenerate
+cd "$FIXTURE_SUPER"
+./subgrove new feat-y >out 2>&1
+register_feature_branch_no_sm feat/feat-y
+state_main="$(snapshot_state .)"
+state_wt="$(snapshot_state .worktree/feat-y)"
+./subgrove update feat-y rebase=ff >out 2>&1
+assert_grep out "Fast-forwarding feature branches onto new main"
+assert_grep out "All feature branches caught up"
+assert_grep_v out "git submodule foreach 'git rebase main'"
+# Parent stays untouched (update is ref-only; no submodules to fast-forward).
+assert_state_eq .                "$state_main" "[rebase_ff_degenerate] main super"
+assert_state_eq .worktree/feat-y "$state_wt"   "[rebase_ff_degenerate] peer"
+# §15: status reflects the resulting state (update retains the worktree).
+assert_status feat-y "feat/feat-y"
+cleanup_fixture_remote_no_sm

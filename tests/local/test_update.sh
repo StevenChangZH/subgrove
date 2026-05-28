@@ -18,6 +18,9 @@ cd "$FIXTURE_SUPER"
 # Capture feat-y/sm-b's main BEFORE — sibling sm-b doesn't move, so this
 # should be unchanged after update.
 sm_b_main_before="$(git -C .worktree/feat-y/sm-b rev-parse main)"
+# Capture the feature branch tip too — without rebase=ff, update is ref-only
+# and must NOT advance the checked-out feature branch (only main).
+feat_a_before="$(git -C .worktree/feat-y/sm-a rev-parse feat/feat-y)"
 # Move sibling sm-a's main forward; subgrove will fetch this into main
 # super's sm-a, then propagate via the _update_sync sentinel.
 commit_one "$FIXTURE_ROOT/sm-a" "upstream change"
@@ -26,6 +29,11 @@ new_main="$(git -C "$FIXTURE_ROOT/sm-a" rev-parse main)"
 assert_branch_at .worktree/feat-y/sm-a main "$new_main"
 # sm-b in the peer is untouched — sibling sm-b didn't get a new commit.
 assert_branch_at .worktree/feat-y/sm-b main "$sm_b_main_before"
+# Default (no rebase=ff): feature branch left exactly where it was, and the
+# manual-rebase hint is printed rather than any branch being auto-advanced.
+assert_branch_at .worktree/feat-y/sm-a feat/feat-y "$feat_a_before"
+assert_grep out "git submodule foreach 'git rebase main'"
+assert_grep_v out "Fast-forwarding feature branches"
 # §15: status reflects the resulting state. update is ref-only and retains
 # the worktree.
 assert_status feat-y "feat/feat-y"
@@ -252,5 +260,75 @@ assert_branch_at .worktree/feat-y/sm-b main "$new_sm_b"
 # Summary: 1 updated (sm-b), 1 skipped (sm-a).
 assert_grep out "Updated 1 submodule main\(s\); 1 skipped"
 # §15: status reflects the resulting state. update retains the worktree.
+assert_status feat-y "feat/feat-y"
+cleanup_fixture
+
+# --- case: rebase=ff fast-forwards a branch with nothing to replay ---
+# feat/feat-y has no commits of its own, so once update advances main the
+# branch is a strict fast-forward — rebase=ff advances it (and the working
+# tree) automatically; nothing is left for a manual rebase.
+mkfixture_local update_rebase_ff
+cd "$FIXTURE_SUPER"
+./subgrove new feat-y >out 2>&1
+commit_one "$FIXTURE_ROOT/sm-a" "upstream change"
+new_main="$(git -C "$FIXTURE_ROOT/sm-a" rev-parse main)"
+./subgrove update feat-y rebase=ff >out 2>&1
+# Both the ref-only main advance AND the feature-branch fast-forward landed.
+assert_branch_at .worktree/feat-y/sm-a main "$new_main"
+assert_branch_at .worktree/feat-y/sm-a feat/feat-y "$new_main"
+# FF moved the branch, did not detach HEAD.
+assert_head_on .worktree/feat-y/sm-a feat/feat-y
+# sm-a fast-forwarded; sm-b had no upstream movement → already current.
+assert_grep out "Fast-forwarded 1;"
+assert_grep out "All feature branches caught up"
+# Nothing outstanding → no manual-rebase hint.
+assert_grep_v out "git submodule foreach 'git rebase main'"
+# §15: status reflects the resulting state.
+assert_status feat-y "feat/feat-y"
+cleanup_fixture
+
+# --- case: rebase=ff leaves a branch with commits to replay for manual rebase ---
+# A real feature commit on sm-a's branch + an independent upstream advance
+# makes the branch diverge from the new main. rebase=ff refuses to rewrite
+# it (that's a real rebase, the user's call) and points at the manual hint.
+mkfixture_local update_rebase_ff_diverged
+cd "$FIXTURE_SUPER"
+./subgrove new feat-y >out 2>&1
+commit_one .worktree/feat-y/sm-a "feature work"
+feat_a="$(git -C .worktree/feat-y/sm-a rev-parse feat/feat-y)"
+commit_one "$FIXTURE_ROOT/sm-a" "upstream change"
+new_main="$(git -C "$FIXTURE_ROOT/sm-a" rev-parse main)"
+./subgrove update feat-y rebase=ff >out 2>&1
+# main advanced (ref-only step), feature branch left exactly where it was.
+assert_branch_at .worktree/feat-y/sm-a main "$new_main"
+assert_branch_at .worktree/feat-y/sm-a feat/feat-y "$feat_a"
+assert_grep out "sm-a.*commit\(s\) to replay"
+assert_grep out "Next: rebase the remaining"
+assert_grep out "git submodule foreach 'git rebase main'"
+# §15: status reflects the resulting state.
+assert_status feat-y "feat/feat-y"
+cleanup_fixture
+
+# --- case: rebase=ff skips a fast-forwardable but dirty tree ---
+# The branch *could* fast-forward, but the peer's working tree is dirty.
+# rebase=ff must not touch it (update never clobbers pending edits) and
+# must leave it for a manual rebase with the dirty edit preserved.
+mkfixture_local update_rebase_ff_dirty
+cd "$FIXTURE_SUPER"
+./subgrove new feat-y >out 2>&1
+feat_a_before="$(git -C .worktree/feat-y/sm-a rev-parse feat/feat-y)"
+commit_one "$FIXTURE_ROOT/sm-a" "upstream change"
+new_main="$(git -C "$FIXTURE_ROOT/sm-a" rev-parse main)"
+echo "dirty" >> .worktree/feat-y/sm-a/README
+assert_pending_file .worktree/feat-y/sm-a README unstaged
+./subgrove update feat-y rebase=ff >out 2>&1
+# main advanced; feature branch NOT moved (dirty tree protected).
+assert_branch_at .worktree/feat-y/sm-a main "$new_main"
+assert_branch_at .worktree/feat-y/sm-a feat/feat-y "$feat_a_before"
+assert_grep out "sm-a.*tree is dirty"
+assert_grep out "git submodule foreach 'git rebase main'"
+# Dirty edit preserved.
+assert_pending_file .worktree/feat-y/sm-a README unstaged
+# §15: status reflects the resulting state.
 assert_status feat-y "feat/feat-y"
 cleanup_fixture

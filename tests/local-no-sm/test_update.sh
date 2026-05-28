@@ -104,3 +104,18 @@ assert_pending_file .worktree/feat-y README unstaged
 # §15: status reflects the resulting state.
 assert_status feat-y "feat/feat-y"
 cleanup_fixture
+
+# --- case: rebase=ff on a no-sm super — degenerate, nothing to rebase ---
+# With zero submodules the FF phase iterates the empty list: it reports
+# everything caught up and, crucially, does NOT print the submodule
+# foreach hint (there are no submodules to rebase).
+mkfixture_local_no_sm update_rebase_ff_degenerate
+cd "$FIXTURE_SUPER"
+./subgrove new feat-y >/dev/null 2>&1
+./subgrove update feat-y rebase=ff >out 2>&1
+assert_grep out "Fast-forwarding feature branches onto new main"
+assert_grep out "All feature branches caught up"
+assert_grep_v out "git submodule foreach 'git rebase main'"
+# §15: status reflects the resulting state.
+assert_status feat-y "feat/feat-y"
+cleanup_fixture

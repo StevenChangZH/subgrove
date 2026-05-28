@@ -26,6 +26,9 @@
 #   subgrove update <name>                 Fetch origin in main worktree, then FF each submodule's
 #                                            main in <name>. Manual escape hatch when a peer worktree
 #                                            needs to catch up without going through merge propagation.
+#   subgrove update <name> rebase=ff       Also auto-advance feature branches, but fast-forward only:
+#                                            submodules with commits to replay (or a dirty tree) are
+#                                            left for a manual rebase.
 #   subgrove status [--fetch]              Per-worktree branch, touched submodules, and local + origin/main
 #                                            state. Read-only; --fetch refreshes origin/main first.
 #   subgrove list                          Show worktrees and their feature branches.
@@ -98,6 +101,7 @@ subgrove - parallel feature worktrees for a git superproject with submodules
   subgrove remove <name>                 Remove worktree (refuses if dirty; branches remain).
   subgrove remove <name> -f              Discard uncommitted work and force-remove (force=true).
   subgrove update <name>                 Catch a peer worktree up to origin/main without merging.
+  subgrove update <name> rebase=ff       Also fast-forward feature branches that have no commits to replay.
   subgrove status [--fetch]              Per-worktree branch, touched submodules, local + remote state.
   subgrove list                          Show worktrees and their feature branches.
   subgrove help                          Show this help.
@@ -626,6 +630,13 @@ EOF
 cmd_update() {
     local name="${1:-}"
     validate_name "$name"
+    shift || true
+
+    # rebase=ff opts into auto-advancing feature branches, but ONLY where it
+    # is a zero-risk fast-forward (see the FF phase below). Any other value
+    # (incl. absent) leaves update ref-only and just prints the manual hint.
+    local rebase_arg
+    rebase_arg="$(parse_kv rebase manual "$@")"
 
     discover_root
     cd "$ROOT"
@@ -695,12 +706,77 @@ cmd_update() {
     done < <(list_all_submodules)
 
     info "Updated $updated submodule main(s); $skipped skipped"
-    cat <<EOF
+
+    if [[ "$rebase_arg" != "ff" ]]; then
+        cat <<EOF
 
 Next: rebase the feature branches in $name onto the new main where needed.
   cd $wt_path
   git submodule foreach 'git rebase main'      # let conflicts halt the loop
 EOF
+        return 0
+    fi
+
+    # --- rebase=ff: auto-advance feature branches, fast-forward ONLY ---
+    # update is otherwise ref-only (touches no working tree); this phase is
+    # the single opt-in exception and stays inside the same guarantee by
+    # mutating a working tree only on a strict fast-forward of a clean tree.
+    # Anything with commits to replay, or a dirty tree, is left for the user
+    # to rebase by hand — exactly the cases where an automatic rewrite could
+    # surprise. See docs/design/update.md.
+    info "Fast-forwarding feature branches onto new main (rebase=ff)"
+    local ff_done=0 ff_current=0 head_ref br ahead manual_list=()
+    while IFS= read -r sm; do
+        peer_sm="$wt_path/$sm"
+        [[ -e "$peer_sm/.git" ]] || continue
+        # Need a local main to fast-forward onto (the FF step above may have
+        # skipped this submodule, e.g. no origin/main or diverged peer main).
+        git -C "$peer_sm" rev-parse --verify --quiet refs/heads/main >/dev/null 2>&1 || continue
+        git -C "$peer_sm" rev-parse --verify --quiet HEAD >/dev/null 2>&1 || continue
+        head_ref="$(git -C "$peer_sm" symbolic-ref --quiet HEAD 2>/dev/null || true)"
+        if [[ -n "$head_ref" ]]; then br="${head_ref#refs/heads/}"; else br="(detached)"; fi
+
+        # HEAD already at or ahead of main → nothing to do.
+        if git -C "$peer_sm" merge-base --is-ancestor refs/heads/main HEAD 2>/dev/null; then
+            ff_current=$((ff_current + 1))
+            continue
+        fi
+        # main is ahead. Strict fast-forward only when HEAD is an ancestor of
+        # main; otherwise the branch has commits of its own → real rebase.
+        if ! git -C "$peer_sm" merge-base --is-ancestor HEAD refs/heads/main 2>/dev/null; then
+            ahead="$(git -C "$peer_sm" rev-list --count refs/heads/main..HEAD 2>/dev/null || echo '?')"
+            echo "    $sm: $br has $ahead commit(s) to replay — rebase manually"
+            manual_list+=("$sm")
+            continue
+        fi
+        # Fast-forward is possible. Never touch a dirty tree.
+        if ! is_clean "$peer_sm"; then
+            echo "    $sm: $br fast-forwardable but tree is dirty — rebase manually"
+            manual_list+=("$sm")
+            continue
+        fi
+        if git -C "$peer_sm" merge --ff-only --quiet main 2>/dev/null; then
+            echo "    $sm: $br → $(git -C "$peer_sm" rev-parse --short refs/heads/main)"
+            ff_done=$((ff_done + 1))
+        else
+            echo "    warn: $sm: $br fast-forward failed — rebase manually"
+            manual_list+=("$sm")
+        fi
+    done < <(list_all_submodules)
+
+    info "Fast-forwarded $ff_done; ${#manual_list[@]} need manual rebase; $ff_current already current"
+
+    if [[ ${#manual_list[@]} -gt 0 ]]; then
+        cat <<EOF
+
+Next: rebase the remaining feature branch(es) in $name — ${manual_list[*]}
+  cd $wt_path
+  git submodule foreach 'git rebase main'      # let conflicts halt the loop
+EOF
+    else
+        echo
+        info "All feature branches caught up — nothing to rebase."
+    fi
 }
 
 cmd_list() {

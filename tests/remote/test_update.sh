@@ -196,3 +196,28 @@ assert_state_eq .worktree/feat-n/sm-b "$state_wt_b" "[noop] peer sm-b"
 # §15: status reflects the resulting state.
 assert_status feat-n "feat/feat-n"
 cleanup_fixture_remote
+
+# --- case: rebase=ff fast-forwards a branch with nothing to replay ---
+# sm-a's origin advances; feat/feat-ff has no commits of its own, so once
+# update advances peer main, rebase=ff fast-forwards the feature branch onto
+# it (working tree included). sm-b never moved → already current.
+mkfixture_remote update_rebase_ff
+cd "$FIXTURE_SUPER"
+./subgrove new feat-ff >out 2>&1
+register_feature_branch feat/feat-ff
+
+new_sm_a="$(push_to_origin_main "$SUBGROVE_TEST_SM_URL" "upstream sm-a")"
+
+./subgrove update feat-ff rebase=ff >out 2>&1
+
+# Both the ref-only main advance AND the feature-branch fast-forward landed.
+assert_branch_at .worktree/feat-ff/sm-a main "$new_sm_a"
+assert_branch_at .worktree/feat-ff/sm-a feat/feat-ff "$new_sm_a"
+# FF moved the branch, did not detach HEAD.
+assert_head_on .worktree/feat-ff/sm-a feat/feat-ff
+assert_grep out "Fast-forwarded 1;"
+assert_grep out "All feature branches caught up"
+assert_grep_v out "git submodule foreach 'git rebase main'"
+# §15: status reflects the resulting state.
+assert_status feat-ff "feat/feat-ff"
+cleanup_fixture_remote
