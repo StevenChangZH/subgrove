@@ -44,3 +44,13 @@ After the survey, these design points appear to be unusual-to-novel in combinati
 5. **Two-phase merge with FF validation before any mutation, plus an `EXIT` rollback trap on `cmd_new`.** Lifecycle hygiene that the comparable scripts don't package.
 
 The honest summary: the script's complexity isn't from over-engineering — it's a consequence of holding three properties simultaneously (per-feature parent worktree, per-worktree-isolated submodule git dirs, cross-worktree main propagation). The tools that drop *any one* of those properties have a much simpler implementation than this one needs to be.
+
+## Positioning: niche dominance, not "superset"
+
+A recurring temptation is to market subgrove as a *superset* of the tools above — "it does everything they do, plus submodules." Recorded here so the framing doesn't drift, because that claim is false on three counts:
+
+- **The topologies are mutually exclusive.** gita and Google `repo` are polyrepo coordinators: many independent repos, no parent. subgrove's entire model assumes a superproject whose gitlinks are the source of truth for component SHAs — the assumption that makes FF-merge and peer propagation work. A tool cannot simultaneously be "the parent records the SHAs" and "there is no parent."
+- **A literal superset would need runtimes subgrove forbids.** Matching gwq's fuzzy TUI, `repo`'s manifest engine, gita's async fan-out, and git-worktree-toolbox's MCP server means shipping a TUI, a manifest parser, and an MCP server — i.e. abandoning "a single distributed shell script, no runtime beyond bash" (CLAUDE.md). Even today, in the one overlapping domain (plain worktree create/list/remove), subgrove is a *subset* of gwq, not a superset.
+- **Breadth dilutes the only thing that makes it findable.** subgrove's wedge is that it is the *sole* tool that touches submodules. Claiming general-worktree-manager parity invites comparison on general-worktree-manager terms, where a Go binary with a fuzzy finder wins; "does everything" reads as "best at nothing."
+
+The defensible claim, scoped to the niche: *for a superproject with submodules*, subgrove **consolidates** what you would otherwise assemble from a worktree manager's create/list/remove **plus** coordinated submodule branching / FF-merge / propagation **plus** submodule sync — everything those tools do *for this case*, and the part all of them skip. That is niche dominance with an honest consolidation claim, not a superset of every tool.
