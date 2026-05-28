@@ -159,8 +159,19 @@ assert_worktrees_ignored() {
 }
 
 # is_clean DIR  -> 0 if working tree + index are clean, 1 otherwise (untracked allowed)
+#
+# --ignore-submodules=dirty keeps this config-independent and gives the
+# per-location cleanliness gate its intended semantics: a submodule with only a
+# dirty *working tree* does NOT trip the PARENT check here — it is caught by
+# that submodule's own require_clean, which names it ("... submodule 'sm-a'
+# ...") — while an un-recorded gitlink bump (a real parent-level change) IS
+# still caught. Without the flag, behavior follows the user's
+# diff.ignoreSubmodules: under git's default a dirty submodule wrongly trips the
+# parent check first, which passed locally (dev had it set to "dirty") but
+# failed on a clean-config CI runner.
 is_clean() {
-    git -C "$1" diff --quiet 2>/dev/null && git -C "$1" diff --cached --quiet 2>/dev/null
+    git -C "$1" diff --quiet --ignore-submodules=dirty 2>/dev/null \
+        && git -C "$1" diff --cached --quiet --ignore-submodules=dirty 2>/dev/null
 }
 
 require_clean() {
