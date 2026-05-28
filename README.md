@@ -7,6 +7,8 @@ Parallel feature development for a git superproject with submodules. One feature
 
 A single shell script. Zero install. Readable in fifteen minutes.
 
+![subgrove: init, new, status, and merge across a superproject and its submodules](docs/demo.gif)
+
 **The only worktree tool that speaks submodules.** Single-repo managers (gwq, grove) treat worktrees as independent; multi-repo tools (Google `repo`, gita) have no parent at all — none model submodules. For a superproject you'd otherwise stitch together a worktree manager, manual submodule branching, and a sync script; subgrove does all of it from one command surface (`new` / `merge` / `update` / `remove` / `status`), across the parent **and** every submodule, with cross-worktree propagation none of them attempt.
 
 ## Is this for you?
