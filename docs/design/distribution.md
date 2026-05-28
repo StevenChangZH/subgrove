@@ -49,3 +49,14 @@ The release tarball must be built (`./build.sh`) and in sync before tagging, so 
 bash and zsh completions ship as adjunct files under `completions/` (`subgrove.bash`, `_subgrove`), installed by the Homebrew formula (`bash_completion.install`, `zsh_completion.install`) and documented for manual sourcing. They complete: the subcommand names; existing worktree names for `merge` / `update` / `remove` / `status` (discovered the same way the script discovers anything — `git rev-parse --show-toplevel`, source `.subgroverc` for `WORKTREES_DIR`, list its subdirectories); submodule paths for `touch=` (from `.gitmodules`); and `true`/`false` for `push=` / `build=` / `force=`.
 
 This does **not** breach "a single distributed shell script" (CLAUDE.md rule #2). That rule is about the *executable*: the runnable `subgrove` stays one self-contained file with no runtime siblings. Completion scripts are optional, install-time adjuncts a package manager drops next to the binary — the same way Homebrew ships completions alongside any single-file tool. They are static (not generated from `lib/`), so `build.sh` is unaffected. fish and PowerShell completions are deferred until asked for (YAGNI).
+
+## Other package channels: AUR and Nix
+
+The personal Homebrew tap reaches macOS/Linux brew users; two cheap additions widen reach for a single-file script. Both live in the repo as ready-to-use artifacts:
+
+- **AUR** (`packaging/aur/PKGBUILD`) — installs the built script + completions + LICENSE, depending on `git` and `bash`; this is the channel gita reaches Arch users through (`gita-git`). The committed `PKGBUILD` is a **template**: AUR needs a release tarball, so set `pkgver` and the `sha256sums` to a tagged release before publishing (as with the tap, the tarball must be a *built, in-sync* tag — `./build.sh`).
+- **Nix** (`flake.nix`) — a flake that builds subgrove straight from source and installs the script + shell completions (`installShellCompletion`), wrapping the runtime tools (`git` et al.) onto its `PATH`. Because it builds from source it needs no release/checksum — `nix run github:stevencnb/subgrove` works once pushed; run `nix flake lock` once to pin nixpkgs. A nixpkgs submission would instead pin a release rev via `fetchFromGitHub`.
+
+**homebrew-core stays deferred** until the project clears the notability + stable-release-history bars (revisit once stars/forks justify it); the tap plus these two channels cover the interim.
+
+All three versions — `subgrove`'s `VERSION`, `flake.nix`'s `version`, and the PKGBUILD's `pkgver` — are single-sourced from `VERSION` and must move together; `tests/local/test_version.sh` fails on drift. See CLAUDE.md § Versioning.
