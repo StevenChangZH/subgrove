@@ -21,7 +21,7 @@ Operationally these collapse into one: every byte under the user's control — c
 
 - **Destructive operations are bounded.** `rm -rf` and `branch -D` appear only in:
   - `cmd_remove` (`subgrove:388–389`) — gated by the cleanliness check, or `-f`; never reached if the feat-branch preservation fetch above fails.
-  - `_rollback_new` (`subgrove:62–74`) — only touches the worktree + branch this same invocation just created (trap armed at `subgrove:239`, after the create at `subgrove:231`). The `branch -D` is skipped when the branch advanced past its creation SHA (`ROLLBACK_BR_SHA`, captured at `subgrove:238`), so build-chain commits aren't lost.
+  - `_rollback_new` — only touches the worktree + branch this same invocation just created (trap armed right after `git worktree add`, covering submodule init + branch creation). The build chain runs *after* the trap is disarmed, so a build failure keeps the worktree (and any commits the build made) rather than rolling back — see [lifecycle.md](lifecycle.md). The `branch -D` is still skipped when the branch advanced past its creation SHA (`ROLLBACK_BR_SHA`), retained as defense-in-depth though no surviving rollback path commits on the parent.
 - **`cmd_update` is ref-only** (`subgrove:603–681`). No working-tree touch in main worktree or peer; no `require_clean`. The `_update_sync` sentinel is created and deleted around the propagation fetch; the defensive pre-clean refuses to delete a same-named ref that isn't a stale sentinel (`subgrove:646–654`).
 - **`merge -f` was deliberately removed.** See [trade-offs.md](trade-offs.md): "The right resolution is to commit or drop that work, not wipe it."
 
@@ -42,7 +42,7 @@ Patterns enforced across the local suite:
 
 Untracked files are deliberately excluded from `snapshot_state` so the test's own `out` redirect doesn't pollute the snapshot. See [testing.md § Test design principles](testing.md#test-design-principles).
 
-The no-submodule tier (`tests/local-no-sm/`) enforces the same patterns where they apply: `snapshot_state` + `assert_state_eq` on every refuse/no-op path; `assert_pending_file` on dirty-refuse cases; `assert_ancestor` on the success path of `merge_golden`; `assert_branch_at` (with captured pre-SHA) on each `-f` force-remove case to verify the parent feat branch survives a force-discard of the dirty worktree; parent-state snapshot on the `new_build_chain_bad` rollback to verify the trap's blast radius is bounded. See [testing-local-no-sm.md](testing-local-no-sm.md) for the per-scenario tables.
+The no-submodule tier (`tests/local-no-sm/`) enforces the same patterns where they apply: `snapshot_state` + `assert_state_eq` on every refuse/no-op path; `assert_pending_file` on dirty-refuse cases; `assert_ancestor` on the success path of `merge_golden`; `assert_branch_at` (with captured pre-SHA) on each `-f` force-remove case to verify the parent feat branch survives a force-discard of the dirty worktree; parent-state snapshot on the `new_build_fail_keeps` build-failure case to verify the kept worktree adds only the gitignored dir + feat branch and nothing else. See [testing-local-no-sm.md](testing-local-no-sm.md) for the per-scenario tables.
 
 The remote tier (`tests/remote/`) pins the same byte-identical preservation across wire-only paths the local fixtures can't reach:
 
@@ -73,8 +73,10 @@ Reachability (`merge-base --is-ancestor`) rather than strict equality: a sentine
 
 `test_remove.sh::remove_preserve_fetch_fail` forces the fetch to fail (a `feat` branch in the main submodule is a directory/file conflict against creating `refs/heads/feat/<name>`) and pins that the worktree and its feat-branch commits survive the aborted `remove -f`.
 
-### `_rollback_new` branch with build-chain commits (`subgrove:56–78`)
+### Build failure keeps the worktree (`cmd_new`)
 
-`_rollback_new` removes the worktree and deletes its parent feat branch on any failed `cmd_new`. If an atypical build chain committed onto that branch before failing, an unconditional `git branch -D` would lose the commits. Now the branch's SHA at `git worktree add` time is captured (`ROLLBACK_BR_SHA`, set at `subgrove:238`); the rollback deletes the branch **only if it is still at that SHA**, and otherwise leaves it in place with a warn. The worktree dir is still removed, so a retry of the same name errs on the existing branch rather than trampling the work.
+A build is slow and re-runnable, and by the time it runs the worktree is structurally complete (submodules initialised, feature branches created). Tearing all that down because the build failed — the old behavior, when the build ran *under* the rollback trap — also risked losing commits an atypical build chain had already made on the parent feat branch. Now `cmd_new` disarms the rollback once setup completes, **before** the build chain. A failing build warns, prints the manual rebuild command(s), leaves the worktree + folder + branches (and any commits) in place, and exits non-zero. See [lifecycle.md](lifecycle.md).
 
-`test_new.sh::new_rollback_committed` drives a build chain that commits on the parent then fails, and pins that the branch survives the rollback at the advanced commit.
+The branch-advance guard in `_rollback_new` (`ROLLBACK_BR_SHA`) is retained as defense-in-depth: no surviving rollback path commits on the parent branch, but if a future *setup* step did, its commits would still be preserved.
+
+`test_new.sh::new_build_fail_keeps` drives a build chain that commits on the parent then fails, and pins that the worktree, its feat branch, and that commit all survive (no rollback); the no-submodule tier's `new_build_fail_keeps` pins the same keep-and-warn for a build that runs and fails in the worktree root.

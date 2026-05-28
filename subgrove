@@ -69,10 +69,12 @@ _rollback_new() {
         git -C "$ROOT" worktree prune 2>/dev/null || true
         if [[ -n "$ROLLBACK_BR" ]]; then
             # Don't delete the branch if it advanced past where `git worktree
-            # add` left it: an atypical build chain that committed onto the
-            # parent feat branch before failing would otherwise lose that work.
-            # The worktree dir is still removed; a retry of the same name then
-            # errs on the existing branch rather than trampling the commits.
+            # add` left it. The build chain — the only step that ever committed
+            # on the parent branch — now runs after this trap is disarmed, so a
+            # surviving rollback only sees the branch still at its creation SHA;
+            # this guard stays as defense-in-depth should a future setup step
+            # commit before failing. The worktree dir is still removed; a retry
+            # then errs on the existing branch rather than trampling commits.
             local cur_sha
             cur_sha="$(git -C "$ROOT" rev-parse --verify --quiet "refs/heads/$ROLLBACK_BR" 2>/dev/null || true)"
             if [[ -n "$cur_sha" && "$cur_sha" != "$ROLLBACK_BR_SHA" ]]; then
@@ -257,9 +259,11 @@ cmd_new() {
     info "Creating worktree at $wt_path on branch $branch (base: $base)"
     git worktree add "$wt_path" -b "$branch" "$base"
 
-    # Arm rollback: from here onwards, any non-zero exit (including err / set -e
-    # / Ctrl-C) tears down the half-built worktree so a retry of the same name
-    # doesn't trip on residue. Disarmed at end of cmd_new on success.
+    # Arm rollback: from here through the end of setup (submodule init + branch
+    # creation), any non-zero exit (err / set -e / Ctrl-C) tears down the
+    # half-built worktree so a retry of the same name doesn't trip on residue.
+    # Disarmed once setup completes, before the build chain — a build failure
+    # keeps the (structurally complete) worktree rather than rolling it back.
     ROLLBACK_WT="$wt_path"
     ROLLBACK_BR="$branch"
     ROLLBACK_BR_SHA="$(git -C "$ROOT" rev-parse --verify --quiet "refs/heads/$branch" 2>/dev/null || true)"
@@ -306,13 +310,33 @@ cmd_new() {
         info "Submodule branching skipped (touch=none)"
     fi
 
+    # Setup is complete: the worktree is structurally whole (submodules
+    # initialised, feature branches created). Disarm the rollback BEFORE the
+    # build chain — the build is a slow, re-runnable, best-effort step, and a
+    # build failure must not tear down the now-complete worktree (nor any
+    # commits an atypical build already made). Setup failures above still roll
+    # back; a build failure is reported below and the worktree is kept.
+    ROLLBACK_WT=""
+    ROLLBACK_BR=""
+    ROLLBACK_BR_SHA=""
+    trap - EXIT INT TERM
+
+    local build_failed=""
     if [[ ${#BUILD_CHAIN[@]} -eq 0 ]]; then
         info "No BUILD_CHAIN configured — skipping auto-build"
     elif [[ "$build_arg" == "true" ]]; then
         info "Running build chain (cold builds are slow)"
         for module in "${BUILD_CHAIN[@]}"; do
             info "  build: $module"
-            ( cd "$wt_path/$module" && eval "$BUILD_CMD" )
+            # Guarded so a failing build doesn't trip set -e: the rollback is
+            # already disarmed, so an unguarded exit here would skip the warning
+            # below and leave the user without the rebuild hint. Stop at the
+            # first failure — the chain is ordered and later modules typically
+            # depend on earlier ones.
+            if ! ( cd "$wt_path/$module" && eval "$BUILD_CMD" ); then
+                build_failed="$module"
+                break
+            fi
         done
     else
         info "Build chain skipped (build=false). Run manually:"
@@ -321,11 +345,24 @@ cmd_new() {
         done
     fi
 
-    # Disarm rollback — cmd_new completed successfully.
-    ROLLBACK_WT=""
-    ROLLBACK_BR=""
-    ROLLBACK_BR_SHA=""
-    trap - EXIT INT TERM
+    if [[ -n "$build_failed" ]]; then
+        # The worktree is built and kept; only the build failed. Warn loudly,
+        # show how to finish the build by hand (from the failed module onward),
+        # and exit non-zero so callers notice the partial success.
+        local seen=""
+        {
+            echo ">>> build failed in $build_failed — worktree kept (the build is re-runnable)."
+            echo "    Worktree: $wt_path"
+            echo "    Branch:   $branch"
+            echo "    Fix the build, then run:"
+            for module in "${BUILD_CHAIN[@]}"; do
+                [[ -z "$seen" && "$module" != "$build_failed" ]] && continue
+                seen=1
+                echo "    ( cd $wt_path/$module && $BUILD_CMD )"
+            done
+        } >&2
+        exit 1
+    fi
 
     cat <<EOF
 

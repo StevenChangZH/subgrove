@@ -203,3 +203,56 @@ assert_head_on wt/feat-wtdir/sm-b feat/feat-wtdir
 # §15: status reflects the resulting state.
 assert_status feat-wtdir "feat/feat-wtdir"
 cleanup_fixture_remote
+
+# --- case: build failure keeps the worktree (wire-cloned super) ---
+# Belt-and-suspenders over local/test_new's new_build_fail_keeps (cf. the
+# custom-WORKTREES_DIR case above): the build runs after setup, so a build
+# failure keeps the (structurally complete) worktree + branches rather than
+# rolling back — behavior that doesn't depend on the fetch/push paths, pinned
+# here against a real origin clone. `new` warns and exits non-zero; main super
+# stays byte-identical.
+mkfixture_remote new_build_fail_keeps
+cd "$FIXTURE_SUPER"
+cat > .subgroverc <<'EOF'
+BUILD_CHAIN=(sm-a)
+BUILD_CMD="touch built-marker; false"
+COPY_TO_NEW_WORKTREE=()
+BRANCH_PREFIX="feat/"
+EOF
+# Commit the config so the pre-`new` snapshot is clean — otherwise the dirty
+# .subgroverc edit is baked into the baseline and a regression that reverted it
+# would slip past assert_state_eq (the local tier commits it for the same reason).
+git add .subgroverc
+git commit --quiet -m "build chain that runs and fails"
+state_main_p="$(snapshot_state .)"
+state_main_a="$(snapshot_state sm-a)"
+state_main_b="$(snapshot_state sm-b)"
+new_failed=0
+./subgrove new feat-bc >out 2>&1 || new_failed=1
+register_feature_branch feat/feat-bc
+[[ $new_failed -eq 1 ]] || fail "expected new to exit non-zero when the build fails"
+# Reached the build phase, ran it in the initialised submodule, and reported
+# the failure as a kept worktree.
+assert_grep out "Running build chain"
+assert_grep out "build failed in sm-a"
+assert_grep out "worktree kept"
+assert_grep_v out "rolling back"
+# Worktree + branches survived, on the feature branch, with the artifact the
+# build wrote before failing — the folder is kept intact, not cleaned out.
+assert_file_exists .worktree/feat-bc
+assert_head_on .worktree/feat-bc feat/feat-bc
+assert_head_on .worktree/feat-bc/sm-a feat/feat-bc
+assert_head_on .worktree/feat-bc/sm-b feat/feat-bc
+assert_file_exists .worktree/feat-bc/sm-a/built-marker
+# The build did not commit, so the feat branch stayed at its base (origin/main).
+assert_branch_at . feat/feat-bc "$(git rev-parse origin/main)"
+# Main super — parent AND both submodules — byte-identical: the build ran in
+# the worktree's isolated sm-a, never main super's. assert_state_eq sm-a/sm-b
+# inspect each as its own repo, catching working-tree corruption a parent-only
+# snapshot can miss under a submodule-dirty-hiding gitconfig.
+assert_state_eq .    "$state_main_p" "[build_fail_keeps] main super parent"
+assert_state_eq sm-a "$state_main_a" "[build_fail_keeps] main super sm-a"
+assert_state_eq sm-b "$state_main_b" "[build_fail_keeps] main super sm-b"
+# §15: status reflects the resulting state — the kept worktree is listed.
+assert_status feat-bc "feat/feat-bc"
+cleanup_fixture_remote

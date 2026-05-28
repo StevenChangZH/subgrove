@@ -316,13 +316,13 @@ assert_file_absent .worktree/feat-skip/.nonexistent-file
 assert_status feat-skip "feat/feat-skip"
 cleanup_fixture
 
-# --- case: rollback keeps a branch that gained commits ---
-# If the build chain commits onto the parent feat branch and then fails,
-# _rollback_new must NOT delete the branch — those commits would be lost. The
-# worktree dir is still removed; the branch survives, so a retry errs on
-# "already exists" rather than trampling the work. BUILD_CMD runs with cwd
-# $wt/sm-a, so `git -C ..` operates on the parent worktree (HEAD on feat/feat-x).
-mkfixture_local new_rollback_committed
+# --- case: build failure keeps the worktree (even with a commit on the branch) ---
+# The build chain runs AFTER the rollback trap is disarmed, so a build failure
+# must NOT tear the worktree down. Strongest case: the build commits onto the
+# parent feat branch and then fails — the worktree, the branch, AND the commit
+# must all survive, and `new` exits non-zero. BUILD_CMD runs with cwd $wt/sm-a,
+# so `git -C ..` operates on the parent worktree (HEAD on feat/feat-x).
+mkfixture_local new_build_fail_keeps
 cd "$FIXTURE_SUPER"
 cat > .subgroverc <<'EOF'
 BUILD_CHAIN=(sm-a)
@@ -335,17 +335,20 @@ git commit --quiet -m "build chain that commits on the parent then fails"
 base_sha="$(git rev-parse main)"
 new_failed=0
 ./subgrove new feat-x >out 2>&1 || new_failed=1
-[[ $new_failed -eq 1 ]] || fail "expected new to fail when build chain fails"
-# Worktree torn down...
-assert_file_absent .worktree/feat-x
-# ...but the branch survived because it advanced past its creation SHA.
+[[ $new_failed -eq 1 ]] || fail "expected new to exit non-zero when the build fails"
+# Worktree kept (not rolled back), HEAD still on the feature branch...
+assert_file_exists .worktree/feat-x
+assert_head_on .worktree/feat-x feat/feat-x
+# ...the branch survived AND kept the commit the build made before failing.
 assert_branch_at . feat/feat-x
 assert_commits_ahead . main feat/feat-x 1
-assert_grep out "advanced past its creation point"
 assert_ne "$base_sha" "$(git rev-parse feat/feat-x)" "feat branch should have advanced"
-# §15: status reflects the resulting state. The worktree was torn down (only
-# the surviving branch remains, which status doesn't list), so none exist.
-assert_status "no feature worktrees yet"
+# Warned (pointing at the kept worktree) and did NOT roll back.
+assert_grep out "build failed in sm-a"
+assert_grep out "worktree kept"
+assert_grep_v out "rolling back"
+# §15: status reflects the resulting state — the kept worktree is still listed.
+assert_status feat-x "feat/feat-x"
 cleanup_fixture
 
 # --- case: touch= with nonexistent submodule name refused ---

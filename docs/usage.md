@@ -38,8 +38,9 @@ Behavior:
 - Fetches `origin/main` first to anchor the new worktree on the freshest base. The feature branch is created off `origin/main`, not local `main`.
 - Initializes submodules with `git submodule update --init --reference <main-worktree-sm-gitdir>`, which makes the new worktree share the main worktree's submodule object DB via `objects/info/alternates`. Refs stay isolated per worktree (git's submodule isolation is unavoidable); only objects are shared.
 - Copies items in `COPY_TO_NEW_WORKTREE` from the main worktree into the new worktree. Missing items are silently skipped.
-- Runs `BUILD_CMD` inside each `BUILD_CHAIN` module in order. With `build=false`, prints the commands the user would run.
-- Has an `EXIT`/`INT`/`TERM` rollback trap: if anything fails mid-creation, the half-built worktree and its feature branch are removed so a retry of the same name doesn't trip on residue.
+- Runs `BUILD_CMD` inside each `BUILD_CHAIN` module in order, stopping at the first failure. With `build=false`, prints the commands the user would run instead.
+- Has an `EXIT`/`INT`/`TERM` rollback trap covering **setup** (submodule init, branch creation): if a setup step fails, the half-built worktree and its feature branch are removed so a retry of the same name doesn't trip on residue.
+- A **build failure does not roll back.** The build runs after setup, when the worktree is already complete, so `new` keeps the worktree, its branches (and any commits the build made), warns, prints the command(s) to finish the build by hand, and exits non-zero. Re-run the build manually, or `remove` the worktree to start over.
 
 See [docs/design/lifecycle.md](design/lifecycle.md) for the full rationale.
 

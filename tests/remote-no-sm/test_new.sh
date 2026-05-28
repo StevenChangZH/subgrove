@@ -278,3 +278,46 @@ assert_head_on wt/feat-wtdir feat/feat-wtdir
 # §15: status reflects the resulting state.
 assert_status feat-wtdir "feat/feat-wtdir"
 cleanup_fixture_remote_no_sm
+
+# --- case: build failure keeps the worktree (wire-cloned no-sm super) ---
+# Belt-and-suspenders over local-no-sm/test_new's new_build_fail_keeps (cf. the
+# custom-WORKTREES_DIR case above): the build runs after setup, so a build
+# failure keeps the worktree + branch rather than rolling back — independent of
+# the fetch/push paths, pinned here against a real origin clone. BUILD_CHAIN=(.)
+# builds in the worktree root since there are no submodules.
+mkfixture_remote_no_sm new_build_fail_keeps
+cd "$FIXTURE_SUPER"
+cat > .subgroverc <<'EOF'
+BUILD_CHAIN=(.)
+BUILD_CMD="touch built-marker; false"
+COPY_TO_NEW_WORKTREE=()
+BRANCH_PREFIX="feat/"
+EOF
+# Commit so the pre-`new` snapshot is clean — otherwise the dirty .subgroverc
+# edit is baked into the baseline and a regression that reverted it would slip
+# past assert_state_eq (the local tier commits it for the same reason).
+git add .subgroverc
+git commit --quiet -m "build chain that runs and fails"
+state_main="$(snapshot_state .)"
+new_failed=0
+./subgrove new feat-bc >out 2>&1 || new_failed=1
+register_feature_branch_no_sm feat/feat-bc
+[[ $new_failed -eq 1 ]] || fail "expected new to exit non-zero when the build fails"
+# Reached the build phase, ran it in the worktree root, and reported the
+# failure as a kept worktree.
+assert_grep out "Running build chain"
+assert_grep out "build failed in \."
+assert_grep out "worktree kept"
+assert_grep_v out "rolling back"
+# Worktree + branch survived, on the feature branch, with the artifact the
+# build wrote before failing — the folder is kept intact, not cleaned out.
+assert_file_exists .worktree/feat-bc
+assert_head_on .worktree/feat-bc feat/feat-bc
+assert_file_exists .worktree/feat-bc/built-marker
+# The build did not commit, so the feat branch stayed at its base (origin/main).
+assert_branch_at . feat/feat-bc "$(git rev-parse origin/main)"
+# Main super byte-identical: the build ran in the worktree, never main super.
+assert_state_eq . "$state_main" "[build_fail_keeps] main super"
+# §15: status reflects the resulting state — the kept worktree is listed.
+assert_status feat-bc "feat/feat-bc"
+cleanup_fixture_remote_no_sm

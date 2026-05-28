@@ -139,49 +139,48 @@ assert_grep out "No BUILD_CHAIN configured"
 assert_status feat-bi "feat/feat-bi"
 cleanup_fixture
 
-# --- case: BUILD_CHAIN=(sm-a) on no-sm super — rollback via build phase ---
-# The build loop does `cd $WT/sm-a` which fails because sm-a doesn't exist.
-# The error message leaks from the shell (`cd: ... No such file or directory`)
-# rather than being a clean "no such submodule" diagnostic — but rollback
-# still fires correctly. The no-sm equivalent of local/test_new's
-# "rollback on submodule-init failure" scenario.
-mkfixture_local_no_sm new_build_chain_bad
+# --- case: build failure keeps the worktree (no-sm tier) ---
+# A build that runs and fails must NOT tear the worktree down: by the time the
+# build runs, the worktree is structurally complete. `new` warns, keeps the
+# worktree + branch (and any artifacts the build already wrote), and exits
+# non-zero. The no-sm counterpart of local/test_new's new_build_fail_keeps —
+# BUILD_CHAIN=(.) builds in the worktree root since there are no submodules.
+mkfixture_local_no_sm new_build_fail_keeps
 cd "$FIXTURE_SUPER"
 cat > .subgroverc <<'EOF'
-BUILD_CHAIN=(sm-a)
-BUILD_CMD="touch .built"
+BUILD_CHAIN=(.)
+BUILD_CMD="touch built-marker; false"
 COPY_TO_NEW_WORKTREE=()
 BRANCH_PREFIX="feat/"
 EOF
 git add .subgroverc
-git commit --quiet -m "BUILD_CHAIN with nonexistent module"
-# Snapshot parent super state BEFORE the failed new — the rollback trap
-# must clean up the worktree + branch and nothing else. A regression
-# where the trap accidentally removes .subgroverc / README / the
-# subgrove symlink would be invisible to the "worktree + branch gone"
-# assertions alone.
+git commit --quiet -m "BUILD_CHAIN that runs and fails"
+# Snapshot parent super state BEFORE — a kept worktree adds only the gitignored
+# .worktree/<name>/ dir + the feat branch ref, and snapshot_state captures
+# neither, so the snapshot must be byte-identical afterward. A regression that
+# ate .subgroverc / README / the subgrove symlink would still surface here.
 super_state=$(snapshot_state .)
-if ./subgrove new feat-bc >out 2>&1; then
-    fail "expected new to fail when BUILD_CHAIN references a missing submodule"
-fi
-# The script reaches the build phase before failing.
+new_failed=0
+./subgrove new feat-bc >out 2>&1 || new_failed=1
+[[ $new_failed -eq 1 ]] || fail "expected new to exit non-zero when the build fails"
+# Reached the build phase, ran it, and reported the failure as a kept worktree.
 assert_grep out "Running build chain"
-# Pin SOME trace of the failure mode itself (the leaky `cd: No such file
-# or directory` shell error). Without this, "rollback happened" could
-# mask a regression where rollback now fires from an unrelated earlier
-# failure (e.g. a `set -e` change exiting before the build phase runs).
-assert_grep out "[Nn]o such file or directory"
-# Rollback fired and bounded its blast radius — worktree+branch gone,
-# parent super otherwise byte-identical.
-assert_file_absent .worktree/feat-bc
-assert_no_branch . feat/feat-bc
+assert_grep out "build failed in \."
+assert_grep out "worktree kept"
+assert_grep_v out "rolling back"
+# Worktree + branch survived (the user's setup is not torn down)...
+assert_file_exists .worktree/feat-bc
+assert_branch_at . feat/feat-bc
+# ...including the artifact the build wrote before failing — the folder is kept
+# intact, not cleaned out.
+assert_file_exists .worktree/feat-bc/built-marker
+# Main super otherwise byte-identical; nothing the old rollback ate is gone.
 assert_state_eq . "$super_state"
-# Files the rollback must NOT have eaten.
 assert_file_exists .subgroverc
 assert_file_exists README
 assert_file_exists subgrove
-# §15: status reflects the resulting state.
-assert_status_absent feat-bc
+# §15: status reflects the resulting state — the kept worktree is listed.
+assert_status feat-bc "feat/feat-bc"
 cleanup_fixture
 
 # --- case: pre-existing worktree dir refused ---

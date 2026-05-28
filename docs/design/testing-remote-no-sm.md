@@ -245,7 +245,7 @@ These paths are either covered elsewhere or genuinely N/A on a no-sm super:
 - **All per-submodule scenarios** (peer-side commits on submodule mains, per-package push order, partial-failure half-states, sm-a-ahead-while-sm-b-clean, etc.). No submodules → no scenario. The with-sm tier (`tests/remote/`) covers these.
 - **`merge push=true` partial-failure half-state.** Requires multiple packages. N/A on a no-sm super.
 - **The `merge` dirty-refuse matrix from the with-sm tier.** Exponential in `(parent, sm-a, sm-b) × (staged, unstaged)`; the no-sm super collapses to the parent axes only, which the `merge_dirty_parent` (push=false) and `merge_push_dirty` (push=true) single-case scenarios already cover.
-- **`BUILD_CHAIN=(sm-a)` rollback.** Subgrove's `cd $WT/sm-a` fails because sm-a doesn't exist; rollback fires correctly. Already covered by `tests/local-no-sm/test_new.sh::new_build_chain_bad`; the failure mode doesn't depend on whether the super was cloned vs init'd.
+- **Build failure keeps the worktree.** A failing build leaves the worktree (and any commits) in place rather than rolling it back — local execution with no wire dimension. Already covered by `tests/local-no-sm/test_new.sh::new_build_fail_keeps`; the behavior doesn't depend on whether the super was cloned vs init'd.
 - **Origin ahead by *many* commits.** The single-commit `super_origin_ahead` scenario proves the fetch+rebase logic works; an N-commit variant adds no new code path.
 
 ## Cross-reference
