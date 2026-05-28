@@ -1,8 +1,8 @@
 # Maintainer: Steven Chang <https://github.com/stevencnb>
 #
-# AUR PKGBUILD for subgrove. `pkgver` tracks VERSION in `subgrove` — bump both
-# together at each release. Before publishing to the AUR, set the sha256sum to
-# the release tarball's checksum (`makepkg -g`). subgrove is a single
+# AUR PKGBUILD for subgrove. `pkgver` tracks VERSION in `subgrove`, and the
+# sha256sum is the v$pkgver release tarball's checksum — regenerate both when
+# bumping (`makepkg -g` recomputes the sum). subgrove is a single
 # self-contained shell script; the release tarball must be built (`./build.sh`)
 # and in sync before tagging so it carries the inlined `init` wizard.
 pkgname=subgrove
@@ -14,7 +14,7 @@ url="https://github.com/stevencnb/subgrove"
 license=('MIT')
 depends=('git' 'bash')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')   # TODO: replace with the real checksum before publishing
+sha256sums=('10faf3480c8dddbb628efac9459843012fdc1024f93ab40029637308c4f693c1')
 
 package() {
     cd "$srcdir/$pkgname-$pkgver"
