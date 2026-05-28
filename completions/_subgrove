@@ -1,0 +1,59 @@
+#compdef subgrove
+# zsh completion for subgrove. Install: put this file (named `_subgrove`) on
+# your $fpath and run `compinit`, or let Homebrew drop it in
+# (zsh_completion.install). Mirrors completions/subgrove.bash.
+
+# Existing feature-worktree names (basenames under WORKTREES_DIR). Runs in a
+# $(...) subshell below, so sourcing .subgroverc here cannot leak into the
+# interactive shell. WORKTREES_DIR defaults to .worktree, overridden by the
+# repo's .subgroverc — matching how subgrove resolves it.
+_subgrove_worktrees() {
+  local root WORKTREES_DIR=.worktree wt
+  root=$(git rev-parse --show-toplevel 2>/dev/null) || return 0
+  [[ -n $root ]] || return 0
+  [[ -f $root/.subgroverc ]] && source $root/.subgroverc 2>/dev/null
+  [[ -d $root/$WORKTREES_DIR ]] || return 0
+  for wt in $root/$WORKTREES_DIR/*(/N); do
+    print -r -- ${wt:t}
+  done
+}
+
+_subgrove() {
+  local -a subcmds
+  subcmds=(
+    'init:guided setup — write .subgroverc, gitignore the worktrees dir'
+    'new:create a feature worktree (branch parent + submodules)'
+    'merge:fast-forward a feature back to main, propagate to peers'
+    'update:catch a peer worktree up to origin/main'
+    'remove:remove a feature worktree (branches retained)'
+    'status:per-worktree branch, touched submodules, local + remote state'
+    'list:list worktrees'
+    'help:show usage'
+    'version:print the version'
+  )
+
+  if (( CURRENT == 2 )); then
+    _describe -t commands 'subgrove command' subcmds
+    return
+  fi
+
+  local cmd=${words[2]}
+  case $cmd in
+    (merge|update|remove|status)
+      if (( CURRENT == 3 )); then
+        local -a wts
+        wts=( ${(f)"$(_subgrove_worktrees)"} )
+        _describe -t worktrees 'worktree' wts
+        return
+      fi
+      ;;
+  esac
+
+  case $cmd in
+    (new)    _values 'flag' 'touch=' 'build=' ;;
+    (merge)  _values 'flag' 'push=' ;;
+    (remove) _values 'flag' '-f' 'force=' ;;
+  esac
+}
+
+_subgrove "$@"
