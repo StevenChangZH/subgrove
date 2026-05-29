@@ -51,6 +51,16 @@ BUILD_CHAIN=()
 BUILD_CMD="./init.sh && ./build.sh"
 COPY_TO_NEW_WORKTREE=()
 BRANCH_PREFIX="feat/"
+# Default for `merge`'s push= (config: PUSH_DEFAULT). "false" keeps push opt-in
+# — the historical behavior; set PUSH_DEFAULT="true" in .subgroverc to publish
+# every merge without typing push=true. `merge <name> push=...` still overrides.
+PUSH_DEFAULT="false"
+# subgrove version that wrote .subgroverc (config: SUBGROVE_CONFIG_VERSION),
+# stamped by `init`. Empty here on purpose: a config predating this field leaves
+# it unset, which discover_root treats as invalid (→ rerun init). Only the MAJOR
+# component is compared. Deliberately NOT named VERSION — .subgroverc is sourced
+# into this script, so a bare VERSION= would clobber the script's own VERSION.
+SUBGROVE_CONFIG_VERSION=""
 
 # err exits non-zero with a red ✗-tagged "Error:" line — the failure tag of the
 # user-data-rules.md notice convention. Color auto-disables off a TTY / under
@@ -192,8 +202,11 @@ assert_main_worktree() {
 # silently operating on built-in defaults. Only `init` — which *writes* the
 # config — opts out, by passing --allow-missing-config.
 discover_root() {
-    local allow_missing_config=false
-    [[ "${1:-}" == "--allow-missing-config" ]] && allow_missing_config=true
+    local allow_missing_config=false version_mode=enforce
+    case "${1:-}" in
+        --allow-missing-config) allow_missing_config=true ;;
+        --version-warn)         version_mode=warn ;;
+    esac
     assert_main_worktree
     ROOT="$(git rev-parse --show-toplevel)" || err "could not determine superproject root"
     if [[ -f "$ROOT/.subgroverc" ]]; then
@@ -204,6 +217,41 @@ discover_root() {
     This repo isn't set up for subgrove yet. Run:
         subgrove init"
     fi
+    # init is about to rewrite .subgroverc, so never gate it on the version the
+    # file currently records (which may be absent or from a different major).
+    [[ "$allow_missing_config" == "true" ]] && return 0
+    check_config_version "$version_mode"
+}
+
+# check_config_version MODE   (MODE: enforce | warn)
+#
+# Compares the SUBGROVE_CONFIG_VERSION that .subgroverc just set against this
+# script's VERSION, on the MAJOR component only — a patch/minor bump never
+# forces a re-init. A config missing the field, or with a different major, is
+# "invalid":
+#   enforce (mutating commands new/merge/update/remove): err, pointing at init.
+#   warn    (read-only status/list): print a stderr notice and continue, so the
+#           diagnostic commands still run against an out-of-date config.
+# The notice is a plain stderr line rather than a queued ⚠ ATTENTION entry: it
+# fires during discovery, before a command's notice machinery, and clean runs
+# assert that the ATTENTION section is absent. See docs/design/config-version.md.
+check_config_version() {
+    local mode="$1"
+    local want="${VERSION%%.*}" have="${SUBGROVE_CONFIG_VERSION:-}"
+    [[ -n "$have" && "${have%%.*}" == "$want" ]] && return 0
+    local why
+    if [[ -z "$have" ]]; then
+        why=".subgroverc has no SUBGROVE_CONFIG_VERSION (written before this subgrove, or hand-edited)"
+    else
+        why=".subgroverc was generated for subgrove $have, incompatible with $VERSION (different major)"
+    fi
+    if [[ "$mode" == "warn" ]]; then
+        printf '>>> warning: %s — rerun `subgrove init` to refresh it\n' "$why" >&2
+        return 0
+    fi
+    err "$why.
+    Re-generate it for this version:
+        subgrove init"
 }
 
 assert_worktrees_ignored() {
@@ -507,11 +555,15 @@ cmd_merge() {
     validate_name "$name"
     shift || true
 
-    local push_arg
-    push_arg="$(parse_kv push false "$@")"
-
     discover_root
     cd "$ROOT"
+
+    # push= default comes from PUSH_DEFAULT, which discover_root just sourced
+    # from .subgroverc; an explicit push= on the command line overrides it.
+    # (Must run AFTER discover_root — before it, PUSH_DEFAULT is still the
+    # built-in default, so the config knob would never take effect.)
+    local push_arg
+    push_arg="$(parse_kv push "$PUSH_DEFAULT" "$@")"
 
     local branch="${BRANCH_PREFIX}$name"
     local wt_path="$ROOT/$WORKTREES_DIR/$name"
@@ -863,7 +915,7 @@ cmd_update() {
 }
 
 cmd_list() {
-    discover_root
+    discover_root --version-warn
     cd "$ROOT"
     git worktree list
 }
@@ -974,7 +1026,7 @@ cmd_status() {
         --fetch) fetch=true ;;
     esac
 
-    discover_root
+    discover_root --version-warn
     cd "$ROOT"
 
     # Parent origin/main is shared across all linked worktrees, so a single
@@ -1107,6 +1159,15 @@ cmd_init() {
         COPY_TO_NEW_WORKTREE+=("$citem")
     done
 
+    # 6. Default for `merge push=` — whether a plain `merge` also pushes to
+    #    origin. `merge <name> push=...` overrides this per-invocation.
+    local _push_ans
+    _init_prompt _push_ans "Push merged branches to origin by default? (true/false)" "$PUSH_DEFAULT"
+    case "$_push_ans" in
+        true|True|TRUE|yes|Yes|y|Y|1) PUSH_DEFAULT="true" ;;
+        *)                            PUSH_DEFAULT="false" ;;
+    esac
+
     # Write .subgroverc, backing up any existing one first.
     if [[ -f "$rc" ]]; then
         cp "$rc" "$rc.bak"
@@ -1116,6 +1177,11 @@ cmd_init() {
         echo "# subgrove configuration — generated by 'subgrove init'."
         echo "# Sourced by subgrove from the superproject root. See"
         echo "# .subgroverc.example for the full schema and notes."
+        echo
+        echo "# subgrove version that generated this file. subgrove compares only the"
+        echo "# major component; a missing line or a different major makes repo-touching"
+        echo "# commands stop and ask you to rerun 'subgrove init'. Don't hand-edit."
+        printf 'SUBGROVE_CONFIG_VERSION="%s"\n' "$VERSION"
         echo
         echo "# Folder (repo-relative) that holds per-feature worktrees; gitignored."
         printf 'WORKTREES_DIR="%s"\n' "$WORKTREES_DIR"
@@ -1131,6 +1197,9 @@ cmd_init() {
         echo
         echo "# Feature branch prefix (include the trailing separator, e.g. \"feat/\")."
         printf 'BRANCH_PREFIX="%s"\n' "$BRANCH_PREFIX"
+        echo
+        echo "# Default for 'merge push=' (true/false). 'merge <name> push=...' overrides."
+        printf 'PUSH_DEFAULT="%s"\n' "$PUSH_DEFAULT"
     } > "$rc"
     info "Wrote $rc"
 

@@ -20,6 +20,7 @@ assert_grep out "No submodules detected"
 assert_file_exists .subgroverc
 assert_grep .subgroverc 'WORKTREES_DIR="\.worktree"'
 assert_grep .subgroverc 'BUILD_CHAIN=\(\)'      # empty chain on a flat repo
+assert_grep .subgroverc 'SUBGROVE_CONFIG_VERSION="[0-9]+\.[0-9]+\.[0-9]+"'   # init stamps the running version
 assert_grep .gitignore '\.worktree/'
 assert_file_exists .worktree
 # Repo is usable: new works on the flat super.

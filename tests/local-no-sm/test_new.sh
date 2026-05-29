@@ -148,6 +148,7 @@ cleanup_fixture
 mkfixture_local_no_sm new_build_fail_keeps
 cd "$FIXTURE_SUPER"
 cat > .subgroverc <<'EOF'
+SUBGROVE_CONFIG_VERSION="0.1.1"
 BUILD_CHAIN=(.)
 BUILD_CMD="touch built-marker; false"
 COPY_TO_NEW_WORKTREE=()
@@ -318,6 +319,7 @@ cleanup_fixture
 mkfixture_local_no_sm new_custom_wtdir
 cd "$FIXTURE_SUPER"
 cat > .subgroverc <<'EOF'
+SUBGROVE_CONFIG_VERSION="0.1.1"
 WORKTREES_DIR="wt"
 BUILD_CHAIN=()
 BUILD_CMD="true"

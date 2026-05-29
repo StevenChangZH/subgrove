@@ -274,3 +274,65 @@ assert_state_eq .worktree/feat-pf/sm-b "$state_wt_b" "[partial_fail] feat worktr
 # §15: status reflects the resulting state.
 assert_status feat-pf "feat/feat-pf"
 cleanup_fixture_remote
+
+# --- case: PUSH_DEFAULT=true — a plain `merge` pushes without push= ---
+# The config default seeds merge's push=. With it set, `merge` (no push= arg)
+# publishes to origin exactly as `merge ... push=true` would.
+mkfixture_remote merge_push_default_on
+cd "$FIXTURE_SUPER"
+cat > .subgroverc <<'EOF'
+SUBGROVE_CONFIG_VERSION="0.1.1"
+BUILD_CHAIN=()
+BUILD_CMD="true"
+COPY_TO_NEW_WORKTREE=()
+BRANCH_PREFIX="feat/"
+PUSH_DEFAULT="true"
+EOF
+git add .subgroverc && git commit --quiet -m "PUSH_DEFAULT=true"
+git push --quiet origin main   # publish the config so the feat branch (based on origin/main) carries it
+./subgrove new feat-pd >out 2>&1
+register_feature_branch feat/feat-pd
+commit_one .worktree/feat-pd/sm-a "sm-a feat"
+( cd .worktree/feat-pd && git add -A && git commit --quiet -m "bump sm-a" )
+
+./subgrove merge feat-pd >out 2>&1        # NOTE: no push= — relies on PUSH_DEFAULT
+assert_grep out "Pushed: *true"
+
+feat_super="$(git -C .worktree/feat-pd      rev-parse feat/feat-pd)"
+feat_sm_a="$( git -C .worktree/feat-pd/sm-a rev-parse feat/feat-pd)"
+assert_eq "$feat_super" "$(_origin_main "$SUBGROVE_TEST_SUPER_URL")" "super origin advanced via PUSH_DEFAULT"
+assert_eq "$feat_sm_a"  "$(_origin_main "$SUBGROVE_TEST_SM_URL")"    "sm-a origin advanced via PUSH_DEFAULT"
+# §15: status reflects the resulting state.
+assert_status feat-pd "feat/feat-pd"
+cleanup_fixture_remote
+
+# --- case: CLI push=false overrides PUSH_DEFAULT=true ---
+# An explicit push= on the command line always wins over the config default.
+mkfixture_remote merge_push_default_override
+cd "$FIXTURE_SUPER"
+cat > .subgroverc <<'EOF'
+SUBGROVE_CONFIG_VERSION="0.1.1"
+BUILD_CHAIN=()
+BUILD_CMD="true"
+COPY_TO_NEW_WORKTREE=()
+BRANCH_PREFIX="feat/"
+PUSH_DEFAULT="true"
+EOF
+git add .subgroverc && git commit --quiet -m "PUSH_DEFAULT=true"
+git push --quiet origin main   # publish the config so the feat branch (based on origin/main) carries it
+./subgrove new feat-pdo >out 2>&1
+register_feature_branch feat/feat-pdo
+commit_one .worktree/feat-pdo/sm-a "sm-a feat"
+( cd .worktree/feat-pdo && git add -A && git commit --quiet -m "bump sm-a" )
+
+super_pre="$(_origin_main "$SUBGROVE_TEST_SUPER_URL")"
+sm_a_pre="$(_origin_main "$SUBGROVE_TEST_SM_URL")"
+
+./subgrove merge feat-pdo push=false >out 2>&1   # CLI beats the config default
+assert_grep out "Pushed: *false"
+assert_grep out "Push skipped"
+assert_eq "$super_pre" "$(_origin_main "$SUBGROVE_TEST_SUPER_URL")" "super origin NOT pushed (push=false overrides)"
+assert_eq "$sm_a_pre"  "$(_origin_main "$SUBGROVE_TEST_SM_URL")"    "sm-a origin NOT pushed (push=false overrides)"
+# §15: status reflects the resulting state.
+assert_status feat-pdo "feat/feat-pdo"
+cleanup_fixture_remote

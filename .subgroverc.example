@@ -3,6 +3,13 @@
 # Sourced by `subgrove` at startup. subgrove refuses to run a repo-touching
 # command unless this file exists — run `subgrove init` to generate it.
 
+# SUBGROVE_CONFIG_VERSION: the subgrove version this file was written for.
+# `subgrove init` stamps it. subgrove compares only the MAJOR component against
+# its own version: a missing line or a different major makes mutating commands
+# (new/merge/update/remove) stop and ask you to rerun `subgrove init`, while
+# read-only status/list only warn. Keep it present and matching your major.
+SUBGROVE_CONFIG_VERSION="0.1.1"
+
 # WORKTREES_DIR: folder (relative to the superproject root) holding one
 # subdirectory per feature worktree. Must be gitignored — subgrove refuses to
 # run otherwise. Default ".worktree".
@@ -24,3 +31,8 @@ COPY_TO_NEW_WORKTREE=()
 # BRANCH_PREFIX: feature branch prefix. e.g. "feat/" + name "foo" → "feat/foo".
 # Include the trailing separator if you want one (typically "/").
 BRANCH_PREFIX="feat/"
+
+# PUSH_DEFAULT: default for `merge`'s push= (true/false). With "false" (the
+# default), `subgrove merge <name>` does not push; set "true" to publish every
+# merge to origin automatically. `subgrove merge <name> push=...` overrides it.
+PUSH_DEFAULT="false"

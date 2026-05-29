@@ -19,9 +19,9 @@ Mature tools cover one or two of (parent worktree per feature) × (isolated subm
 
 ## Configuration, not hardcoding
 
-Project-specific settings live in `.subgroverc` at the superproject root, discovered at runtime via `discover_root` (git toplevel) and sourced. Knobs are `WORKTREES_DIR`, `BUILD_CHAIN`, `BUILD_CMD`, `COPY_TO_NEW_WORKTREE`, `BRANCH_PREFIX`. `subgrove init` generates the file interactively; `.subgroverc.example` is the hand-edit template. If you find yourself wanting to hardcode a submodule name, branch prefix, or build command into the script, put it in the config instead.
+Project-specific settings live in `.subgroverc` at the superproject root, discovered at runtime via `discover_root` (git toplevel) and sourced. Knobs are `WORKTREES_DIR`, `BUILD_CHAIN`, `BUILD_CMD`, `COPY_TO_NEW_WORKTREE`, `BRANCH_PREFIX`, `PUSH_DEFAULT` (default for `merge push=`), and `SUBGROVE_CONFIG_VERSION` (stamped by `init`, gated on major — see `docs/design/config-version.md`). `subgrove init` generates the file interactively; `.subgroverc.example` is the hand-edit template. If you find yourself wanting to hardcode a submodule name, branch prefix, or build command into the script, put it in the config instead.
 
-A missing `.subgroverc` is fatal for every repo-touching command — `discover_root` errors with a "run `subgrove init`" hint rather than falling back to built-in defaults. Only `init` (which *writes* the file) opts out, via `discover_root --allow-missing-config`; `help`/`--version` never call `discover_root`. `WORKTREES_DIR` is repo-relative and must stay gitignored (`assert_worktrees_ignored`); the script is parameterized on it everywhere, so don't reintroduce a literal `.worktree`.
+A missing `.subgroverc` is fatal for every repo-touching command — `discover_root` errors with a "run `subgrove init`" hint rather than falling back to built-in defaults. Only `init` (which *writes* the file) opts out, via `discover_root --allow-missing-config`; `help`/`--version` never call `discover_root`. The same chokepoint gates `SUBGROVE_CONFIG_VERSION`: an invalid value (missing, or a different major than the script's `VERSION`) is fatal for mutating commands and a warning for read-only `status`/`list` (`discover_root --version-warn`), `init` again exempt — see `docs/design/config-version.md`. `WORKTREES_DIR` is repo-relative and must stay gitignored (`assert_worktrees_ignored`); the script is parameterized on it everywhere, so don't reintroduce a literal `.worktree`.
 
 The `.gitmodules` parser inside `list_all_submodules` gives you the submodule list dynamically. Don't assume a particular count.
 
@@ -31,7 +31,7 @@ The `.gitmodules` parser inside `list_all_submodules` gives you the submodule li
 
 ## Versioning
 
-`VERSION` in `subgrove` is the **single source of truth**. `flake.nix`'s `version` and `packaging/aur/PKGBUILD`'s `pkgver` MUST equal it — bump all three together in one commit. `tests/local/test_version.sh` enforces this and fails on drift (the same guard philosophy as `build.sh --check` for the generated region), so don't hardcode a version anywhere else. At release, also bump the Homebrew formula in the separate `stevencnb/homebrew-tap` repo and tag a *built, in-sync* release (`./build.sh`).
+`VERSION` in `subgrove` is the **single source of truth**. `flake.nix`'s `version` and `packaging/aur/PKGBUILD`'s `pkgver` MUST equal it — bump all three together in one commit. `tests/local/test_version.sh` enforces this and fails on drift (the same guard philosophy as `build.sh --check` for the generated region), so don't hardcode a version anywhere else. (`subgrove init` stamps a *copy* of `VERSION` into each generated `.subgroverc` as `SUBGROVE_CONFIG_VERSION` — a runtime snapshot, not a fourth sync target; the gate compares major only, so a bump never invalidates existing configs mid-`0.x`. See `docs/design/config-version.md`.) At release, also bump the Homebrew formula in the separate `stevencnb/homebrew-tap` repo and tag a *built, in-sync* release (`./build.sh`).
 
 ## Don't
 

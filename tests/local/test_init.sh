@@ -22,6 +22,8 @@ assert_file_exists .subgroverc
 assert_grep .subgroverc 'WORKTREES_DIR="\.worktree"'
 assert_grep .subgroverc 'BRANCH_PREFIX="feat/"'
 assert_grep .subgroverc 'BUILD_CHAIN=\('
+assert_grep .subgroverc 'SUBGROVE_CONFIG_VERSION="[0-9]+\.[0-9]+\.[0-9]+"'   # init stamps the running version
+assert_grep .subgroverc 'PUSH_DEFAULT="(true|false)"'                        # ...and the push default
 assert_grep .gitignore '\.worktree/'
 assert_file_exists .worktree           # init creates the dir so check-ignore matches
 # End-to-end: the repo is now usable by subgrove.
@@ -42,6 +44,7 @@ EOF
 ./subgrove init --defaults >out 2>&1 || { cat out; fail "init reconfigure failed"; }
 assert_file_exists .subgroverc.bak                  # existing rc backed up
 assert_grep .subgroverc 'BRANCH_PREFIX="custom/"'   # existing value preserved
+assert_grep .subgroverc 'SUBGROVE_CONFIG_VERSION='  # init adds the version a pre-feature config lacked
 cleanup_fixture
 
 # --- case: non-TTY stdin doesn't hang (writes defaults) ---

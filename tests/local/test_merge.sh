@@ -596,6 +596,7 @@ cleanup_fixture
 mkfixture_local merge_custom_wtdir
 cd "$FIXTURE_SUPER"
 cat > .subgroverc <<'EOF'
+SUBGROVE_CONFIG_VERSION="0.1.1"
 WORKTREES_DIR="wt"
 BUILD_CHAIN=()
 BUILD_CMD="true"
@@ -625,4 +626,30 @@ assert_branch_at wt/feat-y/sm-a main "$feat_a"
 # finds both worktrees under the configured folder).
 assert_status feat-x "feat/feat-x"
 assert_status feat-y "feat/feat-y"
+cleanup_fixture
+
+# --- case: PUSH_DEFAULT=true config default; CLI push=false overrides ---
+# PUSH_DEFAULT seeds merge's push= default. The local super has no origin, so an
+# actual push isn't exercised here (that's the remote tier) — this pins that an
+# explicit push= on the command line still wins over the config default.
+mkfixture_local merge_push_default_override
+cd "$FIXTURE_SUPER"
+cat > .subgroverc <<'EOF'
+SUBGROVE_CONFIG_VERSION="0.1.1"
+WORKTREES_DIR=".worktree"
+BUILD_CHAIN=()
+BUILD_CMD="true"
+COPY_TO_NEW_WORKTREE=()
+BRANCH_PREFIX="feat/"
+PUSH_DEFAULT="true"
+EOF
+git add .subgroverc && git commit --quiet -m "PUSH_DEFAULT=true"
+./subgrove new feat-x >out 2>&1
+commit_one .worktree/feat-x/sm-a "sm-a change"
+( cd .worktree/feat-x && git add -A && git commit --quiet -m "bump" )
+./subgrove merge feat-x push=false >out 2>&1
+assert_grep out "Pushed: *false"          # explicit push=false beat PUSH_DEFAULT=true
+assert_grep out "Push skipped"
+# §15: status reflects the resulting state.
+assert_status feat-x "feat/feat-x"
 cleanup_fixture

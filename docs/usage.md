@@ -53,7 +53,7 @@ Fast-forward `<BRANCH_PREFIX><name>` → `main` in every place that has its own 
 
 Flags:
 
-- `push=true` — push merged `main` to origin (parent + each affected submodule). Additionally mirrors the new `origin/main` into peer worktrees' `refs/remotes/origin/main`.
+- `push=true` — push merged `main` to origin (parent + each affected submodule). Additionally mirrors the new `origin/main` into peer worktrees' `refs/remotes/origin/main`. The default comes from `PUSH_DEFAULT` in `.subgroverc` (ships `false`); this flag overrides it per run.
 
 Algorithm: split into validation and mutation phases. Phase 0 discovers touched submodules and filters those that need merging. Phase 1 fetches feat objects into the main worktree and verifies fast-forward feasibility for parent + each submodule — no `main` ref is moved. Phase 2 only runs if Phase 1 passed: moves `main` in main worktree's submodule via `git checkout -B main <feat_sha>`, FF-merges parent's `main`, and propagates to peer worktrees.
 
@@ -141,12 +141,14 @@ The `git submodule foreach 'git rebase main'` line is deliberately written witho
 
 | Variable | Type | Default | Purpose |
 |---|---|---|---|
+| `SUBGROVE_CONFIG_VERSION` | string | (stamped by `init`) | subgrove version that wrote the file; compared on major only. Missing or a different major makes mutating commands stop and ask you to rerun `subgrove init` (`status`/`list` only warn). See [config-version.md](design/config-version.md). |
 | `BUILD_CHAIN` | bash array | `()` | Ordered submodule paths to init+build during `new`. |
 | `BUILD_CMD` | string | `./init.sh && ./build.sh` | Shell command run inside each `BUILD_CHAIN` module. |
 | `COPY_TO_NEW_WORKTREE` | bash array | `()` | Files/dirs in main worktree to copy into new worktrees. |
 | `BRANCH_PREFIX` | string | `feat/` | Prefix for feature branch names. Include the trailing separator. |
+| `PUSH_DEFAULT` | string | `false` | Default for `merge`'s `push=` (`true`/`false`). `merge <name> push=...` overrides per invocation. |
 
-Generate this file with `subgrove init` (reconfigure-safe), or see [`.subgroverc.example`](../.subgroverc.example) for the template to copy by hand.
+Generate this file with `subgrove init` (reconfigure-safe), or see [`.subgroverc.example`](../.subgroverc.example) for the template to copy by hand. `init` also stamps `SUBGROVE_CONFIG_VERSION`; if you copy the example by hand, keep that line with its major matching your installed subgrove, or repo-touching commands stop and point you back at `subgrove init` (see [config-version.md](design/config-version.md)).
 
 ## Gotchas
 

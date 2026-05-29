@@ -81,6 +81,7 @@ mkfixture_local() {
 
         echo ".worktree/" > .gitignore
         cat > .subgroverc <<'EOF'
+SUBGROVE_CONFIG_VERSION="0.1.1"
 BUILD_CHAIN=()
 BUILD_CMD="true"
 COPY_TO_NEW_WORKTREE=()

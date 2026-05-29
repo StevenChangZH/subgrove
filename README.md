@@ -98,11 +98,13 @@ Long-form reference: [docs/usage.md](docs/usage.md).
 `.subgroverc` at the superproject root:
 
 ```bash
+SUBGROVE_CONFIG_VERSION="0.1.1"          # stamped by `init`; compared on major (rerun init on mismatch)
 WORKTREES_DIR=".worktree"                # repo-relative folder holding worktrees (gitignored)
 BUILD_CHAIN=(libfoo libbar)              # submodules to init+build after `new`
 BUILD_CMD="./init.sh && ./build.sh"      # build command per BUILD_CHAIN module
 COPY_TO_NEW_WORKTREE=(.claude)           # items copied from main → new worktrees
 BRANCH_PREFIX="feat/"                    # feature branch prefix
+PUSH_DEFAULT="false"                     # default for `merge push=` (push= overrides per run)
 ```
 
 Generate it interactively with `subgrove init` (reconfigure-safe), or copy [.subgroverc.example](.subgroverc.example) and edit by hand. A repo without a `.subgroverc` isn't set up yet: every command except `init`, `help`, and `--version` refuses with a pointer to `subgrove init`.
@@ -119,6 +121,7 @@ The script's complexity is a direct consequence of holding three properties simu
 - [implementation-notes.md](docs/design/implementation-notes.md) — cross-cutting invariants
 - [prior-art.md](docs/design/prior-art.md) — survey of related tools and the gap subgrove fills
 - [distribution.md](docs/design/distribution.md) — repo-root discovery, the single-file build, and Homebrew packaging
+- [config-version.md](docs/design/config-version.md) — the `.subgroverc` version gate (`SUBGROVE_CONFIG_VERSION`)
 - [testing.md](docs/design/testing.md) — how the test suite is structured (+ [testing-local.md](docs/design/testing-local.md) listing every local test case)
 
 ## Testing
