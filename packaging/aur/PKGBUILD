@@ -14,7 +14,7 @@ url="https://github.com/stevencnb/subgrove"
 license=('MIT')
 depends=('git' 'bash')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('10faf3480c8dddbb628efac9459843012fdc1024f93ab40029637308c4f693c1')
+sha256sums=('7b790986fb813fe3c86f563095d205b5e2b3e8efbc95701c9c7f10e81579cdbd')
 
 package() {
     cd "$srcdir/$pkgname-$pkgver"
